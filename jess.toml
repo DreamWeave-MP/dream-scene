@@ -1,0 +1,15 @@
+manifest_version = 1
+
+[package]
+id = "org.dreamweave.scene"
+version = "0.1.0"
+jess_api = "1"
+include = ["src", "bench", "README.md", "DESIGN.md", "PROFILE.md"]
+tests = ["tests/scene.luau"]
+
+[modules]
+"@dream/scene" = "src/scene.luau"
+
+[[layer]]
+id = "dream.scene"
+exports = ["@dream/scene"]

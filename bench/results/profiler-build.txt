@@ -1,0 +1,50 @@
+===== build-batch =====
+build	100000	true	100000	100000	20000200
+jess profile: 348.782 ms script self-time, 1 timed calls, 0 overhead samples (0.000 ms), 24516128 bytes grown
+jess profile: 142532 safepoint samples
+   12353  org.dreamweave.scene@0.1.0/src/scene.luau:165
+    6202  org.dreamweave.scene@0.1.0/src/scene.luau:192
+    6202  org.dreamweave.scene@0.1.0/src/scene.luau:289
+    6202  org.dreamweave.scene@0.1.0/src/scene.luau:439
+    6201  org.dreamweave.scene@0.1.0/src/scene.luau:122
+    6201  org.dreamweave.scene@0.1.0/src/scene.luau:193
+    6201  org.dreamweave.scene@0.1.0/src/scene.luau:341
+    6201  org.dreamweave.scene@0.1.0/src/scene.luau:444
+    6201  org.dreamweave.scene@0.1.0/src/scene.luau:445
+    6153  org.dreamweave.scene@0.1.0/src/scene.luau:396
+    6153  org.dreamweave.scene@0.1.0/src/scene.luau:468
+    6153  org.dreamweave.scene@0.1.0/src/scene.luau:479
+    6152  /mnt/data/scene-jpk/bench/profile_build.luau:11
+    6152  org.dreamweave.scene@0.1.0/src/scene.luau:267
+    6152  org.dreamweave.scene@0.1.0/src/scene.luau:281
+    6152  org.dreamweave.scene@0.1.0/src/scene.luau:390
+    6152  org.dreamweave.scene@0.1.0/src/scene.luau:393
+    6152  org.dreamweave.scene@0.1.0/src/scene.luau:478
+    3125  org.dreamweave.scene@0.1.0/src/scene.luau:244
+    3125  org.dreamweave.scene@0.1.0/src/scene.luau:571
+jess profile: 16944051 native blocks executed, 3 VM exits
+===== build-incremental =====
+build	100000	false	100000	100000	20000200
+jess profile: 408.386 ms script self-time, 1 timed calls, 0 overhead samples (0.000 ms), 32888353 bytes grown
+jess profile: 167239 safepoint samples
+   13086  org.dreamweave.scene@0.1.0/src/scene.luau:289
+   12305  /mnt/data/scene-jpk/bench/profile_build.luau:11
+   12305  org.dreamweave.scene@0.1.0/src/scene.luau:176
+   12305  org.dreamweave.scene@0.1.0/src/scene.luau:193
+   12305  org.dreamweave.scene@0.1.0/src/scene.luau:267
+   12305  org.dreamweave.scene@0.1.0/src/scene.luau:393
+   12305  org.dreamweave.scene@0.1.0/src/scene.luau:439
+   12305  org.dreamweave.scene@0.1.0/src/scene.luau:445
+   12305  org.dreamweave.scene@0.1.0/src/scene.luau:478
+   12304  org.dreamweave.scene@0.1.0/src/scene.luau:166
+   12304  org.dreamweave.scene@0.1.0/src/scene.luau:192
+    3125  org.dreamweave.scene@0.1.0/src/scene.luau:244
+    3125  org.dreamweave.scene@0.1.0/src/scene.luau:545
+    3125  org.dreamweave.scene@0.1.0/src/scene.luau:571
+    3125  org.dreamweave.scene@0.1.0/src/scene.luau:624
+    3125  org.dreamweave.scene@0.1.0/src/scene.luau:625
+    3125  org.dreamweave.scene@0.1.0/src/scene.luau:636
+    3076  org.dreamweave.scene@0.1.0/src/scene.luau:218
+    3076  org.dreamweave.scene@0.1.0/src/scene.luau:232
+    3076  org.dreamweave.scene@0.1.0/src/scene.luau:613
+jess profile: 20901879 native blocks executed, 3 VM exits
