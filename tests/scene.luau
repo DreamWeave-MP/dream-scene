@@ -1,0 +1,1130 @@
+--!strict
+-- The scene's behaviour, case by case, on trees small enough to work out by hand: handles and
+-- their reuse, the tree, transforms, bounds and box queries, masks, view ranges, batches, and
+-- growth past every initial size. Then pinned whole: seeded runs of every operation, with what
+-- they return (update counts, traversal order, query and view results, world positions) folded
+-- into digests recorded from version 0.1.0. The numbers in the hand cases are exact in an f32, so
+-- every expectation is an equality.
+local scene = require '@dream/scene'
+local test = require '@jess/test'
+
+local suite, expect = test.new(), test.expect
+
+type World = typeof(scene.new())
+type Counts = { nodesVisited: number, transformsUpdated: number, boundedNodes: number, boundsUpdated: number }
+
+local Everything = 0xffffffff
+
+--- The handle of `slot` in its `generation`.
+local function handleOf(slot: number, generation: number): number
+  return generation * scene.HANDLE_STRIDE + slot
+end
+
+local function position(world: World, handle: number): { number }
+  return { world:getWorldPosition(handle) }
+end
+
+--- What `update` returns when it visited `transforms` nodes, placed `bounded` own boxes and
+--- folded `bounds` subtree boxes.
+local function counts(transforms: number, bounded: number, bounds: number): Counts
+  return {
+    nodesVisited = transforms,
+    transformsUpdated = transforms,
+    boundedNodes = bounded,
+    boundsUpdated = bounds,
+  }
+end
+
+--- A unit cube around a node's origin.
+local function boxed(world: World, handle: number)
+  world:setBounds(handle, -1, -1, -1, 1, 1, 1)
+end
+
+suite.describe('the module', function()
+  suite.it('exports the constructor and the handle stride, frozen', function()
+    expect(type(scene.new)).toBe 'function'
+    expect(scene.HANDLE_STRIDE).toBe(16777216)
+    expect(table.isfrozen(scene)).toBe(true)
+  end)
+
+  suite.it('starts a scene empty, with 200 bytes for each slot and one spare', function()
+    expect(scene.new(100):stats()).toEqual {
+      nodes = 0,
+      highWaterSlots = 0,
+      capacity = 100,
+      roots = 0,
+      updateVersion = 0,
+      packedBytes = 101 * 200,
+      bytesPerCapacityNode = 200,
+    }
+  end)
+
+  suite.it('gives a scene 256 slots unless told, never fewer than sixteen, and a whole number', function()
+    expect(scene.new():stats().capacity).toBe(256)
+    expect(scene.new(1):stats().capacity).toBe(16)
+    expect(scene.new(100.75):stats().capacity).toBe(100)
+  end)
+
+  suite.it('refuses a capacity past the slots a handle can name', function()
+    expect(function() scene.new(scene.HANDLE_STRIDE) end).toThrow 'scene: initial capacity exceeds handle slot space'
+  end)
+end)
+
+suite.describe('handles', function()
+  suite.it('number slots from one, in generation one', function()
+    local world = scene.new()
+
+    expect(world:create()).toBe(handleOf(1, 1))
+    expect(world:create()).toBe(handleOf(2, 1))
+    expect(world:stats().nodes).toBe(2)
+    expect(world:stats().highWaterSlots).toBe(2)
+  end)
+
+  suite.it('are alive from creation until the node or an ancestor is destroyed', function()
+    local world = scene.new()
+    local parent = world:create()
+    local child = world:create(parent)
+    local other = world:create()
+
+    expect({ world:isAlive(parent), world:isAlive(child), world:isAlive(other) }).toEqual { true, true, true }
+    expect(world:destroy(parent)).toBe(2)
+    expect({ world:isAlive(parent), world:isAlive(child), world:isAlive(other) }).toEqual { false, false, true }
+  end)
+
+  suite.it('are not alive when they name no slot in use', function()
+    local world = scene.new()
+    world:create()
+
+    expect(world:isAlive(0)).toBe(false)
+    expect(world:isAlive(-1)).toBe(false)
+    expect(world:isAlive(handleOf(0, 1))).toBe(false)
+    expect(world:isAlive(handleOf(2, 1))).toBe(false)
+    expect(world:isAlive(handleOf(1, 2))).toBe(false)
+  end)
+
+  suite.it('reuse the slots last freed first, a generation on', function()
+    local world = scene.new()
+    local parent = world:create()
+    world:create(parent)
+    world:create(parent)
+    local other = world:create()
+
+    expect(world:destroy(parent)).toBe(3)
+    expect(world:create()).toBe(handleOf(3, 2))
+    expect(world:create()).toBe(handleOf(2, 2))
+    expect(world:create()).toBe(handleOf(1, 2))
+    expect(world:create()).toBe(handleOf(5, 1))
+    expect(world:isAlive(parent)).toBe(false)
+    expect(world:isAlive(other)).toBe(true)
+    expect(world:stats().nodes).toBe(5)
+    expect(world:stats().highWaterSlots).toBe(5)
+  end)
+
+  suite.it('refuse a destroyed node, in every operation that takes one', function()
+    local world = scene.new()
+    local live = world:create()
+    local stale = world:create()
+    world:destroy(stale)
+    local message = 'scene: stale node handle'
+
+    expect(function() world:destroy(stale) end).toThrow(message)
+    expect(function() world:create(stale) end).toThrow(message)
+    expect(function() world:setParent(stale, live) end).toThrow(message)
+    expect(function() world:setParent(live, stale) end).toThrow(message)
+    expect(function() world:parent(stale) end).toThrow(message)
+    expect(function() world:setTransform(stale, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1) end).toThrow(message)
+    expect(function() world:setPosition(stale, 0, 0, 0) end).toThrow(message)
+    expect(function() world:setRotation(stale, 0, 0, 0, 1) end).toThrow(message)
+    expect(function() world:setScale(stale, 1, 1, 1) end).toThrow(message)
+    expect(function() world:setBounds(stale, 0, 0, 0, 1, 1, 1) end).toThrow(message)
+    expect(function() world:clearBounds(stale) end).toThrow(message)
+    expect(function() world:setMask(stale, 1) end).toThrow(message)
+    expect(function() world:setEnabled(stale, false) end).toThrow(message)
+    expect(function() world:setRange(stale, 0, 1) end).toThrow(message)
+    expect(function() world:getWorldPosition(stale) end).toThrow(message)
+  end)
+
+  suite.it('refuse a slot that was never used', function()
+    local world = scene.new()
+    world:create()
+    local message = 'scene: invalid node handle'
+
+    expect(function() world:setPosition(0, 0, 0, 0) end).toThrow(message)
+    expect(function() world:setPosition(handleOf(0, 1), 0, 0, 0) end).toThrow(message)
+    expect(function() world:setPosition(handleOf(2, 1), 0, 0, 0) end).toThrow(message)
+    expect(function() world:destroy(handleOf(9, 3)) end).toThrow(message)
+  end)
+
+  suite.it('blame the caller of the operation, not the scene', function()
+    local world = scene.new()
+    local stale = world:create()
+    world:destroy(stale)
+
+    -- A stale handle is the error under test; the message is read for the chunk it names.
+    local succeeded, message = pcall(function() world:setPosition(stale, 0, 0, 0) end)
+
+    expect(succeeded).toBe(false)
+    expect(message).toContain 'tests/scene.luau:'
+    expect(string.find(message :: string, 'src/scene.luau', 1, true)).toBeNil()
+  end)
+
+  suite.it('leave a failed create\'s node behind as a root', function()
+    local world = scene.new()
+    local stale = world:create()
+    world:destroy(stale)
+
+    expect(function() world:create(stale) end).toThrow 'scene: stale node handle'
+    expect(world:stats().nodes).toBe(1)
+    expect(world:stats().roots).toBe(1)
+    expect(world:isAlive(handleOf(1, 2))).toBe(true)
+  end)
+end)
+
+suite.describe('the tree', function()
+  suite.it('names a node\'s parent, and none for a root', function()
+    local world = scene.new()
+    local root = world:create()
+    local child = world:create(root)
+    local grandchild = world:create(child)
+
+    expect(world:parent(root)).toBeNil()
+    expect(world:parent(child)).toBe(root)
+    expect(world:parent(grandchild)).toBe(child)
+    expect(world:stats().roots).toBe(1)
+  end)
+
+  suite.it('moves a node under another, and back out to the roots', function()
+    local world = scene.new()
+    local left = world:create()
+    local right = world:create()
+    local child = world:create(left)
+
+    world:setParent(child, right)
+    expect(world:parent(child)).toBe(right)
+    expect(world:stats().roots).toBe(2)
+
+    world:setParent(child, nil)
+    expect(world:parent(child)).toBeNil()
+    expect(world:stats().roots).toBe(3)
+
+    world:setParent(right, child)
+    expect(world:parent(right)).toBe(child)
+  end)
+
+  suite.it('refuses a node as its own parent or its descendant\'s child', function()
+    local world = scene.new()
+    local root = world:create()
+    local child = world:create(root)
+    local grandchild = world:create(child)
+
+    expect(function() world:setParent(root, root) end).toThrow 'scene: node cannot parent itself'
+    expect(function() world:setParent(root, child) end).toThrow 'scene: parenting would create a cycle'
+    expect(function() world:setParent(root, grandchild) end).toThrow 'scene: parenting would create a cycle'
+    expect(world:parent(root)).toBeNil()
+    expect(world:parent(grandchild)).toBe(child)
+  end)
+
+  suite.it('counts the nodes a destroy removes, and leaves the siblings', function()
+    local world = scene.new()
+    local root = world:create()
+    local first = world:create(root)
+    local second = world:create(root)
+    local deep = world:create(first)
+    world:create(deep)
+    world:update()
+
+    expect(world:destroy(first)).toBe(3)
+    expect(world:stats().nodes).toBe(2)
+    expect(world:collect()).toEqual { root, second }
+    expect(world:destroy(root)).toBe(2)
+    expect(world:stats().nodes).toBe(0)
+    expect(world:stats().roots).toBe(0)
+    expect(world:collect()).toEqual {}
+  end)
+
+  suite.it('walks roots and children in the order they were made, a node before its children', function()
+    local world = scene.new()
+    local first = world:create()
+    local second = world:create()
+    local third = world:create()
+    local firstChild = world:create(first)
+    local secondChild = world:create(first)
+    local grandchild = world:create(firstChild)
+
+    expect(world:collect()).toEqual { first, firstChild, grandchild, secondChild, second, third }
+  end)
+
+  suite.it('walks a moved node after the children its new parent had', function()
+    local world = scene.new()
+    local first = world:create()
+    local second = world:create()
+    local third = world:create()
+    local firstChild = world:create(first)
+    local secondChild = world:create(first)
+    local other = world:create(second)
+
+    world:setParent(firstChild, second)
+    expect(world:collect()).toEqual { first, secondChild, second, other, firstChild, third }
+
+    world:setParent(second, nil)
+    expect(world:collect()).toEqual { first, secondChild, second, other, firstChild, third }
+
+    world:setParent(secondChild, nil)
+    expect(world:collect()).toEqual { first, second, other, firstChild, third, secondChild }
+  end)
+end)
+
+suite.describe('transforms', function()
+  suite.it('leave a world position at the origin until the first update', function()
+    local world = scene.new()
+    local node = world:create()
+    world:setPosition(node, 3, 4, 5)
+
+    expect(position(world, node)).toEqual { 0, 0, 0 }
+    world:update()
+    expect(position(world, node)).toEqual { 3, 4, 5 }
+  end)
+
+  suite.it('carry a parent\'s position down to its descendants', function()
+    local world = scene.new()
+    local root = world:create()
+    local child = world:create(root)
+    local grandchild = world:create(child)
+    world:setPosition(root, 100, 200, 300)
+    world:setPosition(child, 10, 20, 30)
+    world:setPosition(grandchild, 1, 2, 3)
+    world:update()
+
+    expect(position(world, root)).toEqual { 100, 200, 300 }
+    expect(position(world, child)).toEqual { 110, 220, 330 }
+    expect(position(world, grandchild)).toEqual { 111, 222, 333 }
+  end)
+
+  suite.it('turn a child about its parent by the parent\'s rotation', function()
+    local world = scene.new()
+    local aboutVertical = world:create()
+    local aboutSide = world:create()
+    local third = world:create()
+    local childOfVertical = world:create(aboutVertical)
+    local childOfSide = world:create(aboutSide)
+    local childOfThird = world:create(third)
+    world:setPosition(aboutVertical, 10, 20, 30)
+    world:setRotation(aboutVertical, 0, 0, 1, 0)
+    world:setRotation(aboutSide, 1, 0, 0, 0)
+    world:setRotation(third, 0.5, 0.5, 0.5, 0.5)
+
+    for _, child in { childOfVertical, childOfSide, childOfThird } do
+      world:setPosition(child, 1, 2, 3)
+    end
+
+    world:update()
+
+    expect(position(world, childOfVertical)).toEqual { 9, 18, 33 }
+    expect(position(world, childOfSide)).toEqual { 1, -2, -3 }
+    expect(position(world, childOfThird)).toEqual { 3, 1, 2 }
+  end)
+
+  suite.it('stretch a child\'s offset by its parent\'s scale, before the parent\'s rotation', function()
+    local world = scene.new()
+    local root = world:create()
+    local child = world:create(root)
+    local grandchild = world:create(child)
+    world:setTransform(root, 10, 20, 30, 0, 0, 1, 0, 2, 3, 4)
+    world:setPosition(child, 1, 1, 1)
+    world:setScale(child, 0.5, 0.5, 0.5)
+    world:setPosition(grandchild, 4, 4, 4)
+    world:update()
+
+    expect(position(world, root)).toEqual { 10, 20, 30 }
+    expect(position(world, child)).toEqual { 8, 17, 34 }
+    expect(position(world, grandchild)).toEqual { 4, 11, 42 }
+  end)
+
+  suite.it('place a moved node under its new parent at the next update', function()
+    local world = scene.new()
+    local left = world:create()
+    local right = world:create()
+    local child = world:create(left)
+    local grandchild = world:create(child)
+    world:setPosition(left, 100, 0, 0)
+    world:setPosition(right, 0, 100, 0)
+    world:setPosition(child, 1, 1, 1)
+    world:setPosition(grandchild, 2, 2, 2)
+    world:update()
+
+    world:setParent(child, right)
+    expect(position(world, grandchild)).toEqual { 103, 3, 3 }
+    expect(world:update()).toEqual(counts(2, 0, 4))
+    expect(position(world, child)).toEqual { 1, 101, 1 }
+    expect(position(world, grandchild)).toEqual { 3, 103, 3 }
+
+    world:setParent(child, nil)
+    world:update()
+    expect(position(world, grandchild)).toEqual { 3, 3, 3 }
+  end)
+
+  suite.it('count what an update placed and folded', function()
+    local world = scene.new()
+    local root = world:create()
+    local bounded = world:create(root)
+    local bare = world:create(root)
+    boxed(world, bounded)
+
+    expect(world:update()).toEqual(counts(3, 1, 3))
+    expect(world:update()).toEqual(counts(0, 0, 0))
+
+    world:setPosition(bounded, 1, 0, 0)
+    expect(world:update()).toEqual(counts(1, 1, 2))
+
+    world:setPosition(root, 1, 0, 0)
+    expect(world:update()).toEqual(counts(3, 1, 3))
+
+    boxed(world, bare)
+    expect(world:update()).toEqual(counts(0, 1, 2))
+
+    world:clearBounds(bare)
+    expect(world:update()).toEqual(counts(0, 0, 2))
+
+    world:setPosition(bounded, 2, 0, 0)
+    world:setPosition(root, 2, 0, 0)
+    world:setPosition(bare, 2, 0, 0)
+    expect(world:update()).toEqual(counts(3, 1, 3))
+  end)
+
+  suite.it('count an update only when it had work', function()
+    local world = scene.new()
+    local node = world:create()
+
+    expect(world:stats().updateVersion).toBe(0)
+    world:update()
+    world:update()
+    expect(world:stats().updateVersion).toBe(1)
+    world:setMask(node, 1)
+    world:setEnabled(node, false)
+    world:setRange(node, 1, 2)
+    world:update()
+    expect(world:stats().updateVersion).toBe(1)
+    world:setScale(node, 2, 2, 2)
+    world:update()
+    expect(world:stats().updateVersion).toBe(2)
+  end)
+end)
+
+suite.describe('bounds', function()
+  suite.it('refuse a box turned inside out, before they look at the handle', function()
+    local world = scene.new()
+    local node = world:create()
+
+    expect(function() world:setBounds(node, 1, 0, 0, 0, 1, 1) end).toThrow 'scene: invalid bounds'
+    expect(function() world:setBounds(node, 0, 1, 0, 1, 0, 1) end).toThrow 'scene: invalid bounds'
+    expect(function() world:setBounds(node, 0, 0, 1, 1, 1, 0) end).toThrow 'scene: invalid bounds'
+    expect(function() world:setBounds(0, 1, 0, 0, 0, 1, 1) end).toThrow 'scene: invalid bounds'
+    world:setBounds(node, 2, 2, 2, 2, 2, 2)
+    world:update()
+    expect(world:queryAabb(2, 2, 2, 2, 2, 2)).toEqual { node }
+  end)
+
+  suite.it('find a box that overlaps or touches the query, where the node now is', function()
+    local world = scene.new()
+    local root = world:create()
+    local child = world:create(root)
+    world:setPosition(root, 10, 0, 0)
+    world:setPosition(child, 5, 0, 0)
+    boxed(world, child)
+    world:update()
+
+    expect(world:queryAabb(14.5, -0.5, -0.5, 15.5, 0.5, 0.5)).toEqual { child }
+    expect(world:queryAabb(16, 1, 1, 17, 2, 2)).toEqual { child }
+    expect(world:queryAabb(12, -3, -3, 14, -1, -1)).toEqual { child }
+    expect(world:queryAabb(16.5, 1, 1, 17, 2, 2)).toEqual {}
+    expect(world:queryAabb(14, 1.5, -1, 16, 2, 1)).toEqual {}
+    expect(world:queryAabb(14, -1, -9, 16, 1, -1.5)).toEqual {}
+    expect(world:queryAabb(-1, -1, -1, 1, 1, 1)).toEqual {}
+  end)
+
+  suite.it('wrap a turned and stretched box in one the axes fit', function()
+    local world = scene.new()
+    local node = world:create()
+    world:setTransform(node, 0, 0, 0, 0, 0, 1, 0, 2, 3, 4)
+    world:setBounds(node, 0, 0, 0, 1, 1, 1)
+    world:update()
+
+    expect(world:queryAabb(-2.5, -3.5, 3.5, -2, -3, 4.5)).toEqual { node }
+    expect(world:queryAabb(-0.5, -0.5, -0.5, 0, 0, 0)).toEqual { node }
+    expect(world:queryAabb(0.25, 0.25, 0.25, 1, 1, 1)).toEqual {}
+    expect(world:queryAabb(-2.5, -3.5, 4.25, -2, -3, 4.5)).toEqual {}
+  end)
+
+  suite.it('answer in traversal order, with bounded ancestors before their descendants', function()
+    local world = scene.new()
+    local root = world:create()
+    local first = world:create(root)
+    local second = world:create(root)
+    local bare = world:create(root)
+    local deep = world:create(bare)
+
+    for _, node in { root, first, second, deep } do
+      boxed(world, node)
+    end
+
+    world:update()
+
+    expect(world:queryAabb(-1, -1, -1, 1, 1, 1)).toEqual { root, first, second, deep }
+    expect(world:queryAabb(-9, -9, -9, 9, 9, 9, Everything, { 1, 2, 3, 4, 5, 6, 7 })).toEqual { root, first, second, deep }
+  end)
+
+  suite.it('follow a node that moves, through every ancestor', function()
+    local world = scene.new()
+    local root = world:create()
+    local middle = world:create(root)
+    local leaf = world:create(middle)
+    boxed(world, leaf)
+    world:update()
+
+    world:setPosition(leaf, 50, 0, 0)
+    expect(world:queryAabb(49, -1, -1, 51, 1, 1)).toEqual {}
+    expect(world:update()).toEqual(counts(1, 1, 3))
+    expect(world:queryAabb(49, -1, -1, 51, 1, 1)).toEqual { leaf }
+    expect(world:queryAabb(-1, -1, -1, 1, 1, 1)).toEqual {}
+
+    world:setPosition(root, 0, 50, 0)
+    world:update()
+    expect(world:queryAabb(49, 49, -1, 51, 51, 1)).toEqual { leaf }
+    expect(world:queryAabb(49, -1, -1, 51, 1, 1)).toEqual {}
+  end)
+
+  suite.it('fold edits made shallow first, deepest first', function()
+    local world = scene.new()
+    local root = world:create()
+    local middle = world:create(root)
+    local low = world:create(middle)
+    local leaf = world:create(low)
+    world:update()
+
+    world:setBounds(middle, 10, 10, 10, 11, 11, 11)
+    world:setBounds(leaf, 20, 20, 20, 21, 21, 21)
+    expect(world:update()).toEqual(counts(0, 2, 4))
+    expect(world:queryAabb(20, 20, 20, 21, 21, 21)).toEqual { leaf }
+    expect(world:queryAabb(0, 0, 0, 30, 30, 30)).toEqual { middle, leaf }
+
+    world:setBounds(root, -5, -5, -5, -4, -4, -4)
+    world:setBounds(low, 40, 40, 40, 41, 41, 41)
+    world:setBounds(leaf, 60, 60, 60, 61, 61, 61)
+    world:clearBounds(middle)
+    expect(world:update()).toEqual(counts(0, 3, 4))
+    expect(world:queryAabb(60, 60, 60, 61, 61, 61)).toEqual { leaf }
+    expect(world:queryAabb(-9, -9, -9, 99, 99, 99)).toEqual { root, low, leaf }
+    expect(world:queryAabb(10, 10, 10, 11, 11, 11)).toEqual {}
+  end)
+
+  suite.it('shrink an ancestor when a box is cleared, moved away or destroyed', function()
+    local world = scene.new()
+    local root = world:create()
+    local near = world:create(root)
+    local far = world:create(root)
+    local other = world:create()
+    world:setPosition(far, 100, 0, 0)
+
+    for _, node in { near, far, other } do
+      boxed(world, node)
+    end
+
+    world:update()
+    expect(world:queryAabb(99, 0, 0, 101, 0, 0)).toEqual { far }
+
+    world:clearBounds(far)
+    expect(world:update()).toEqual(counts(0, 0, 2))
+    expect(world:queryAabb(99, 0, 0, 101, 0, 0)).toEqual {}
+
+    boxed(world, far)
+    world:update()
+    world:setParent(far, other)
+    world:update()
+    expect(world:queryAabb(99, 0, 0, 101, 0, 0)).toEqual { far }
+    expect(world:collectForView(50, 0, 0)).toEqual { root, near, other, far }
+
+    world:destroy(far)
+    expect(world:update()).toEqual(counts(0, 0, 1))
+    expect(world:queryAabb(99, 0, 0, 101, 0, 0)).toEqual {}
+    expect(world:queryAabb(0, 0, 0, 0, 0, 0)).toEqual { near, other }
+  end)
+end)
+
+suite.describe('masks and switches', function()
+  local function family(): (World, number, number, number, number)
+    local world = scene.new()
+    local root = world:create()
+    local child = world:create(root)
+    local grandchild = world:create(child)
+    local other = world:create()
+
+    for _, node in { root, child, grandchild, other } do
+      boxed(world, node)
+    end
+
+    world:update()
+
+    return world, root, child, grandchild, other
+  end
+
+  suite.it('show every node to a traversal with no mask', function()
+    local world, root, child, grandchild, other = family()
+
+    expect(world:collect()).toEqual { root, child, grandchild, other }
+    expect(world:collect(Everything)).toEqual { root, child, grandchild, other }
+    expect(world:queryAabb(0, 0, 0, 0, 0, 0)).toEqual { root, child, grandchild, other }
+    expect(world:collectForView(0, 0, 0)).toEqual { root, child, grandchild, other }
+  end)
+
+  suite.it('hide a node and everything under it from a traversal its mask shares no bit with', function()
+    local world, root, child, grandchild, other = family()
+    world:setMask(child, 2)
+    world:setMask(grandchild, 4)
+    world:setMask(other, 6)
+
+    expect(world:collect(1)).toEqual { root }
+    expect(world:collect(2)).toEqual { root, child, other }
+    expect(world:collect(4)).toEqual { root, other }
+    expect(world:collect(6)).toEqual { root, child, grandchild, other }
+    expect(world:collect(0)).toEqual {}
+    expect(world:queryAabb(0, 0, 0, 0, 0, 0, 4)).toEqual { root, other }
+    expect(world:collectForView(0, 0, 0, 2)).toEqual { root, child, other }
+    expect(world:update()).toEqual(counts(0, 0, 0))
+  end)
+
+  suite.it('hide a disabled node and everything under it until it is enabled again', function()
+    local world, root, child, grandchild, other = family()
+    world:setEnabled(child, false)
+
+    expect(world:collect()).toEqual { root, other }
+    expect(world:queryAabb(0, 0, 0, 0, 0, 0)).toEqual { root, other }
+    expect(world:collectForView(0, 0, 0)).toEqual { root, other }
+
+    world:setEnabled(child, true)
+    world:setEnabled(child, true)
+    expect(world:collect()).toEqual { root, child, grandchild, other }
+
+    world:setEnabled(root, false)
+    world:setEnabled(root, false)
+    expect(world:collect()).toEqual { other }
+  end)
+
+  suite.it('fill the table handed in, and nothing past what was found', function()
+    local world, root, child, grandchild, other = family()
+    local out = { 9, 9, 9, 9, 9, 9, 9, 9 }
+
+    expect(world:collect(nil, out)).toBe(out)
+    expect(out).toEqual { root, child, grandchild, other }
+
+    world:setEnabled(child, false)
+    expect(world:queryAabb(0, 0, 0, 0, 0, 0, nil, out)).toBe(out)
+    expect(out).toEqual { root, other }
+    expect(#out).toBe(2)
+
+    world:setEnabled(root, false)
+    expect(world:collectForView(0, 0, 0, nil, out)).toBe(out)
+    expect(out).toEqual { other }
+
+    world:setEnabled(other, false)
+    expect(world:collect(nil, out)).toBe(out)
+    expect(next(out)).toBeNil()
+  end)
+end)
+
+suite.describe('view ranges', function()
+  suite.it('refuse a range that is negative or ends before it starts, before they look at the handle', function()
+    local world = scene.new()
+    local node = world:create()
+
+    expect(function() world:setRange(node, -1, 5) end).toThrow 'scene: invalid LOD range'
+    expect(function() world:setRange(node, 5, 4) end).toThrow 'scene: invalid LOD range'
+    expect(function() world:setRange(0, 5, 4) end).toThrow 'scene: invalid LOD range'
+    world:setRange(node, 5, 5)
+    world:setRange(node, 0, math.huge)
+  end)
+
+  suite.it('measure to a bare node\'s position, from the near edge up to the far one', function()
+    local world = scene.new()
+    local node = world:create()
+    local child = world:create(node)
+    world:setPosition(node, 100, 0, 0)
+    world:setRange(node, 10, 20)
+    world:update()
+
+    expect(world:collectForView(85, 0, 0)).toEqual { node, child }
+    expect(world:collectForView(90, 0, 0)).toEqual { node, child }
+    expect(world:collectForView(100, 10, 0)).toEqual { node, child }
+    expect(world:collectForView(80, 0, 0)).toEqual {}
+    expect(world:collectForView(95, 0, 0)).toEqual {}
+    expect(world:collectForView(100, 0, 0)).toEqual {}
+    expect(world:collect()).toEqual { node, child }
+  end)
+
+  suite.it('measure to the box around a node and its descendants when there is one', function()
+    local world = scene.new()
+    local node = world:create()
+    local child = world:create(node)
+    world:setPosition(node, 100, 0, 0)
+    world:setPosition(child, 10, 0, 0)
+    boxed(world, child)
+    world:update()
+
+    expect(world:collectForView(0, 0, 0)).toEqual { node, child }
+
+    world:setRange(node, 10, 20)
+    expect(world:collectForView(99, 0, 0)).toEqual { node, child }
+    expect(world:collectForView(94, 0, 0)).toEqual { node, child }
+    expect(world:collectForView(121, 0, 0)).toEqual { node, child }
+    expect(world:collectForView(110, 11, 0)).toEqual { node, child }
+    expect(world:collectForView(100, 0, 0)).toEqual {}
+    expect(world:collectForView(110, 0, 0)).toEqual {}
+    expect(world:collectForView(89, 0, 0)).toEqual {}
+    expect(world:collectForView(131, 0, 0)).toEqual {}
+
+    world:setRange(node, 0, math.huge)
+    world:setRange(child, 0, 4)
+    expect(world:collectForView(110, 0, 0)).toEqual { node, child }
+    expect(world:collectForView(110, 4.5, 0)).toEqual { node, child }
+    expect(world:collectForView(110, 5, 0)).toEqual { node }
+    expect(world:collectForView(1e6, 1e6, 1e6)).toEqual { node }
+  end)
+end)
+
+suite.describe('batches', function()
+  suite.it('refuse an end with no begin, and an update before the end', function()
+    local world = scene.new()
+
+    expect(function() world:endBatch() end).toThrow 'scene: endBatch without beginBatch'
+    world:beginBatch()
+    world:beginBatch()
+    world:endBatch()
+    expect(function() world:update() end).toThrow 'scene: update during batch'
+    world:endBatch()
+    expect(world:update()).toEqual(counts(0, 0, 0))
+    expect(function() world:endBatch() end).toThrow 'scene: endBatch without beginBatch'
+  end)
+
+  suite.it('realize the whole scene at the update after one that changed anything', function()
+    local world = scene.new()
+    local root = world:create()
+    local child = world:create(root)
+    local other = world:create()
+    boxed(world, child)
+    world:update()
+
+    world:beginBatch()
+    world:endBatch()
+    expect(world:update()).toEqual(counts(0, 0, 0))
+
+    world:beginBatch()
+    world:setPosition(child, 5, 0, 0)
+    world:endBatch()
+    expect(world:update()).toEqual(counts(3, 1, 3))
+    expect(position(world, child)).toEqual { 5, 0, 0 }
+    expect(world:queryAabb(6, 0, 0, 7, 0, 0)).toEqual { child }
+
+    world:beginBatch()
+    boxed(world, other)
+    world:endBatch()
+    expect(world:update()).toEqual(counts(3, 2, 3))
+
+    world:beginBatch()
+    local late = world:create(other)
+    world:endBatch()
+    expect(world:update()).toEqual(counts(4, 2, 4))
+    expect(world:collect()).toEqual { root, child, other, late }
+  end)
+
+  suite.it('realize edits made before the batch along with it', function()
+    local world = scene.new()
+    local root = world:create()
+    local child = world:create(root)
+    boxed(world, child)
+    world:update()
+
+    world:setPosition(child, 1, 0, 0)
+    world:setBounds(root, 0, 0, 0, 1, 1, 1)
+    world:beginBatch()
+    world:setPosition(child, 2, 0, 0)
+    world:setBounds(root, 0, 0, 0, 2, 2, 2)
+    world:endBatch()
+    expect(world:update()).toEqual(counts(2, 2, 2))
+    expect(position(world, child)).toEqual { 2, 0, 0 }
+    expect(world:queryAabb(1.5, 1.5, 1.5, 9, 9, 9)).toEqual { root }
+    expect(world:update()).toEqual(counts(0, 0, 0))
+  end)
+
+  suite.it('build the scene an unbatched build does', function()
+    local function build(batched: boolean): (World, { number })
+      local world = scene.new(16)
+      local made = table.create(400)
+
+      if batched then world:beginBatch() end
+
+      for index = 1, 400 do
+        local parent = if index % 9 == 1 then nil else made[index - 1 - index % 4]
+        local node = world:create(parent)
+        made[index] = node
+        world:setPosition(node, index % 7, index % 5 - 2, index % 3)
+
+        if index % 4 ~= 0 then boxed(world, node) end
+        if index % 11 == 0 then world:setRange(node, 0, 30) end
+      end
+
+      if batched then world:endBatch() end
+
+      world:update()
+
+      return world, made
+    end
+
+    local plain, plainMade = build(false)
+    local batched, batchedMade = build(true)
+
+    expect(batchedMade).toEqual(plainMade)
+    expect(batched:collect()).toEqual(plain:collect())
+    expect(batched:queryAabb(0, 0, 0, 12, 12, 12)).toEqual(plain:queryAabb(0, 0, 0, 12, 12, 12))
+    expect(batched:collectForView(60, 3, 3)).toEqual(plain:collectForView(60, 3, 3))
+    expect(#plain:queryAabb(0, 0, 0, 12, 12, 12)).toBe(112)
+    expect(#plain:collectForView(60, 3, 3)).toBe(346)
+
+    for index, node in plainMade do
+      expect(position(batched, batchedMade[index])).toEqual(position(plain, node))
+    end
+  end)
+end)
+
+suite.describe('growth', function()
+  suite.it('keeps every node when the scene outgrows its capacity', function()
+    local world = scene.new(16)
+    local made = table.create(1000)
+
+    for index = 1, 1000 do
+      local node = world:create()
+      made[index] = node
+      world:setPosition(node, index, index * 2, 0)
+      world:setBounds(node, -0.25, -0.25, -0.25, 0.25, 0.25, 0.25)
+    end
+
+    expect(world:update()).toEqual(counts(1000, 1000, 1000))
+    expect(world:stats()).toEqual {
+      nodes = 1000,
+      highWaterSlots = 1000,
+      capacity = 1024,
+      roots = 1000,
+      updateVersion = 1,
+      packedBytes = 1025 * 200,
+      bytesPerCapacityNode = 200,
+    }
+
+    for index, node in made do
+      expect(node).toBe(handleOf(index, 1))
+      expect(position(world, node)).toEqual { index, index * 2, 0 }
+    end
+
+    expect(world:collect()).toEqual(made)
+    expect(world:queryAabb(500, 1000, 0, 500, 1000, 0)).toEqual { made[500] }
+    expect(world:queryAabb(499.75, 0, 0, 501, 2000, 0)).toEqual { made[500], made[501] }
+  end)
+
+  suite.it('walks, moves and destroys a node with five thousand children', function()
+    local world = scene.new(16)
+    local root = world:create()
+    local made = table.create(5001)
+    made[1] = root
+
+    for index = 1, 5000 do
+      local node = world:create(root)
+      made[index + 1] = node
+      world:setPosition(node, index, 0, 0)
+      boxed(world, node)
+    end
+
+    expect(world:update()).toEqual(counts(5001, 5000, 5001))
+    expect(world:collect()).toEqual(made)
+    expect(#world:queryAabb(1000, 0, 0, 1998, 0, 0)).toBe(1001)
+    expect(#world:collectForView(0, 0, 0)).toBe(5001)
+
+    for index = 2, 5001, 2 do
+      world:setPosition(made[index], index - 1, 10, 0)
+    end
+
+    expect(world:update()).toEqual(counts(2500, 2500, 2501))
+    expect(#world:queryAabb(0, 9, 0, 6000, 11, 0)).toBe(2500)
+
+    world:setPosition(root, 0, 0, 100)
+    expect(world:update()).toEqual(counts(5001, 5000, 5001))
+    expect(position(world, made[5001])).toEqual { 5000, 0, 100 }
+    expect(world:destroy(root)).toBe(5001)
+    expect(world:stats().nodes).toBe(0)
+    expect(world:update()).toEqual(counts(0, 0, 0))
+    expect(world:create()).toBe(handleOf(5001, 2))
+  end)
+
+  suite.it('folds bounds up a chain three thousand deep', function()
+    local world = scene.new(16)
+    local made = table.create(3000)
+
+    for index = 1, 3000 do
+      local node = world:create(made[index - 1])
+      made[index] = node
+      world:setPosition(node, 1, 0, 0)
+    end
+
+    expect(world:update()).toEqual(counts(3000, 0, 3000))
+    expect(position(world, made[3000])).toEqual { 3000, 0, 0 }
+    expect(world:collect()).toEqual(made)
+    expect(world:collectForView(0, 0, 0)).toEqual(made)
+    expect(world:queryAabb(0, 0, 0, 9000, 0, 0)).toEqual {}
+
+    world:setBounds(made[10], 0, 100, 0, 1, 101, 1)
+    world:setBounds(made[3000], -0.5, -0.5, -0.5, 0.5, 0.5, 0.5)
+    expect(world:update()).toEqual(counts(0, 2, 3000))
+    expect(world:queryAabb(2999, 0, 0, 3001, 0, 0)).toEqual { made[3000] }
+    expect(world:queryAabb(0, 0, 0, 9000, 200, 0)).toEqual { made[10], made[3000] }
+
+    world:setPosition(made[2], 1, 0, 50)
+    expect(world:update()).toEqual(counts(2999, 2, 3000))
+    expect(position(world, made[3000])).toEqual { 3000, 0, 50 }
+    expect(world:queryAabb(2999, 0, 0, 3001, 0, 0)).toEqual {}
+    expect(world:queryAabb(2999, 0, 50, 3001, 0, 50)).toEqual { made[3000] }
+
+    world:setParent(made[1500], nil)
+    expect(world:update()).toEqual(counts(1501, 1, 3000))
+    expect(position(world, made[3000])).toEqual { 1501, 0, 0 }
+    expect(world:destroy(made[1])).toBe(1499)
+    expect(world:update()).toEqual(counts(0, 0, 0))
+    expect(world:collect()).toEqual(table.move(made, 1500, 3000, 1, {}))
+  end)
+end)
+
+-- The seeded runs. A run makes, moves, reshapes and destroys nodes at random, updates, and folds
+-- everything the scene then answers into one number; the numbers below are what version 0.1.0
+-- answered. An f32's arithmetic is the same on every machine Jess runs on, so they hold anywhere.
+
+type Run = {
+  seed: number,
+  rounds: number,
+  edits: number,
+  --- How many of the newest nodes a new node's parent is drawn from; zero draws from them all.
+  recent: number,
+  --- Out of sixteen, how often a round is made inside a batch.
+  batches: number,
+}
+
+local Rotations = {
+  { 0, 0, 0, 1 },
+  { 0, 0, 1, 0 },
+  { 0, 1, 0, 0 },
+  { 1, 0, 0, 0 },
+  { 0.5, 0.5, 0.5, 0.5 },
+  { 0.5, -0.5, 0.5, 0.5 },
+  { 0, 0, 0.6, 0.8 },
+  { 0.28, 0, 0, 0.96 },
+}
+
+local Scales = { 1, 1, 0.5, 2, 1.5, -1, 0.75, 1.25 }
+local Masks = { Everything, 1, 2, 4, 5, 6, 0x80000000, 0 }
+local bits = buffer.create(8)
+
+--- Folds one more number into a digest, by the bits of its f64. Every NaN folds alike.
+local function fold(digest: number, value: number): number
+  buffer.writef64(bits, 0, if value ~= value then 0 / 0 else value)
+  local low = (digest * 31 + buffer.readu32(bits, 0)) % 4294967291
+
+  return (low * 31 + buffer.readu32(bits, 4)) % 4294967291
+end
+
+local function foldList(digest: number, values: { number }): number
+  local folded = fold(digest, #values)
+
+  for _, value in values do
+    folded = fold(folded, value)
+  end
+
+  return folded
+end
+
+--- The digests of a run, one after each round's update and questions.
+local function digests(run: Run): { number }
+  local world = scene.new(16)
+  local state = run.seed
+  local alive: { number }, out: { number } = {}, {}
+  local results = table.create(run.rounds)
+  local digest = 0
+
+  -- The minimal standard generator: its products stay whole in an f64.
+  local function draw(bound: number): number
+    state = state * 48271 % 2147483647
+
+    return state % bound
+  end
+
+  local function coordinate(): number
+    return (draw(513) - 256) / 4
+  end
+
+  local function pick(): number
+    return alive[draw(#alive) + 1]
+  end
+
+  local function descends(node: number, ancestor: number): boolean
+    local current: number? = node
+
+    while current do
+      if current == ancestor then return true end
+
+      current = world:parent(current)
+    end
+
+    return false
+  end
+
+  local function edit()
+    local choice = draw(40)
+
+    if #alive == 0 or choice < 9 then
+      local parent: number? = nil
+
+      if #alive > 0 and draw(8) > 0 then
+        local window = if run.recent > 0 then math.min(run.recent, #alive) else #alive
+        parent = alive[#alive - draw(window)]
+      end
+
+      table.insert(alive, world:create(parent))
+    elseif choice < 10 then
+      digest = fold(digest, world:destroy(pick()))
+      alive = [for node in alive if world:isAlive(node) => node]
+    elseif choice < 14 then
+      local node = pick()
+      local parent: number? = if draw(6) == 0 then nil else pick()
+
+      if not parent or not descends(parent, node) then world:setParent(node, parent) end
+    elseif choice < 21 then
+      world:setPosition(pick(), coordinate(), coordinate(), coordinate())
+    elseif choice < 23 then
+      local rotation = Rotations[draw(#Rotations) + 1]
+      world:setRotation(pick(), rotation[1], rotation[2], rotation[3], rotation[4])
+    elseif choice < 25 then
+      world:setScale(pick(), Scales[draw(#Scales) + 1], Scales[draw(#Scales) + 1], Scales[draw(#Scales) + 1])
+    elseif choice < 26 then
+      local rotation = Rotations[draw(#Rotations) + 1]
+      local scale = Scales[draw(#Scales) + 1]
+      world:setTransform(
+        pick(),
+        coordinate(),
+        coordinate(),
+        coordinate(),
+        rotation[1],
+        rotation[2],
+        rotation[3],
+        rotation[4],
+        scale,
+        scale,
+        scale
+      )
+    elseif choice < 33 then
+      local column, row, level = coordinate() / 8, coordinate() / 8, coordinate() / 8
+      world:setBounds(pick(), column, row, level, column + draw(17) / 4, row + draw(17) / 4, level + draw(17) / 4)
+    elseif choice < 35 then
+      world:clearBounds(pick())
+    elseif choice < 37 then
+      world:setMask(pick(), Masks[draw(#Masks) + 1])
+    elseif choice < 39 then
+      world:setEnabled(pick(), draw(3) > 0)
+    else
+      local near = draw(200)
+      world:setRange(pick(), near, if draw(3) == 0 then math.huge else near + draw(400))
+    end
+  end
+
+  for round = 1, run.rounds do
+    local batched = draw(16) < run.batches
+
+    if batched then world:beginBatch() end
+
+    for _ = 1, run.edits do
+      edit()
+    end
+
+    if batched then world:endBatch() end
+
+    local updated = world:update()
+    digest = foldList(digest, {
+      updated.nodesVisited,
+      updated.transformsUpdated,
+      updated.boundedNodes,
+      updated.boundsUpdated,
+    })
+
+    digest = foldList(digest, world:collect())
+    digest = foldList(digest, world:collect(Masks[draw(#Masks) + 1], out))
+
+    for _ = 1, 6 do
+      local column, row, level = coordinate(), coordinate(), coordinate()
+      local reach = draw(400) / 4
+      local mask = if draw(4) == 0 then Masks[draw(#Masks) + 1] else nil
+      digest = foldList(
+        digest,
+        world:queryAabb(column, row, level, column + reach, row + reach, level + reach, mask, out)
+      )
+    end
+
+    for _ = 1, 3 do
+      local mask = if draw(4) == 0 then Masks[draw(#Masks) + 1] else nil
+      digest = foldList(digest, world:collectForView(coordinate(), coordinate(), coordinate(), mask, out))
+    end
+
+    for _, node in alive do
+      digest = foldList(digest, position(world, node))
+    end
+
+    local stats = world:stats()
+    digest = foldList(digest, {
+      stats.nodes,
+      stats.highWaterSlots,
+      stats.capacity,
+      stats.updateVersion,
+      stats.packedBytes,
+      #alive,
+    })
+
+    results[round] = digest
+  end
+
+  return results
+end
+
+--- Every `step`th digest of a run, and its last.
+local function sampled(run: Run, step: number): { number }
+  local all = digests(run)
+  local picked = [for index in range(step, #all, step) => all[index]]
+
+  if #all % step ~= 0 then table.insert(picked, all[#all]) end
+
+  return picked
+end
+
+suite.describe('a seeded run', function()
+  suite.it('of a bushy tree answers as version 0.1.0 did', function()
+    expect(sampled({ seed = 1, rounds = 40, edits = 120, recent = 0, batches = 3 }, 10)).toEqual { 1594156250, 2006851490, 3869972110, 1925355065 }
+  end)
+
+  suite.it('of deep chains answers as version 0.1.0 did', function()
+    expect(sampled({ seed = 20261012, rounds = 40, edits = 120, recent = 3, batches = 2 }, 10)).toEqual { 3089328548, 298028726, 3009744065, 2192970977 }
+  end)
+
+  suite.it('made wholly in batches answers as version 0.1.0 did', function()
+    expect(sampled({ seed = 77, rounds = 30, edits = 100, recent = 12, batches = 16 }, 10)).toEqual { 1927076688, 720795767, 3762157010 }
+  end)
+
+  suite.it('with no batch, a few edits to a round, answers as version 0.1.0 did', function()
+    expect(sampled({ seed = 4242, rounds = 300, edits = 6, recent = 24, batches = 0 }, 50)).toEqual { 2767537153, 3408178755, 2093575404, 2752574710, 3426117902, 1310733678 }
+  end)
+
+  suite.it('of thousands of nodes answers as version 0.1.0 did', function()
+    expect(sampled({ seed = 9001, rounds = 12, edits = 1500, recent = 0, batches = 4 }, 3)).toEqual { 2818937036, 380459375, 2101648216, 3674512459 }
+  end)
+end)
+
+return suite
