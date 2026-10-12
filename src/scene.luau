@@ -255,8 +255,10 @@ function Scene:_unlink(slot: number)
         buffer.writei32(self._meta, parent * META_STRIDE + M_FIRST_CHILD, nextNode)
     else
         self._firstRoot = nextNode
-        self._roots -= 1
     end
+
+    if parent == 0 then self._roots -= 1 end
+
     if nextNode ~= 0 then
         buffer.writei32(self._meta, nextNode * META_STRIDE + M_PREV, prev)
     end

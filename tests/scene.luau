@@ -209,6 +209,26 @@ suite.describe('the tree', function()
 
     world:setParent(right, child)
     expect(world:parent(right)).toBe(child)
+    expect(world:stats().roots).toBe(2)
+  end)
+
+  suite.it('counts the roots whichever of them leaves', function()
+    local world = scene.new()
+    local first = world:create()
+    local second = world:create()
+    local third = world:create()
+    local fourth = world:create()
+
+    expect(world:stats().roots).toBe(4)
+    world:destroy(second)
+    expect(world:stats().roots).toBe(3)
+    world:setParent(first, third)
+    expect(world:stats().roots).toBe(2)
+    world:destroy(fourth)
+    expect(world:stats().roots).toBe(1)
+    world:destroy(third)
+    expect(world:stats().roots).toBe(0)
+    expect(world:stats().nodes).toBe(0)
   end)
 
   suite.it('refuses a node as its own parent or its descendant\'s child', function()
@@ -1080,6 +1100,7 @@ local function digests(run: Run): { number }
     end
 
     local stats = world:stats()
+    expect(stats.roots).toBe(#[for node in alive if not world:parent(node) => node])
     digest = foldList(digest, {
       stats.nodes,
       stats.highWaterSlots,
