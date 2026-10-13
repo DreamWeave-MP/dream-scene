@@ -4,6 +4,7 @@
 -- Renderer-agnostic scene/world presentation storage.
 -- Nodes are integer handles into packed buffers; there is one Lua object per Scene, not per node.
 -- Transform ownership is intentionally a tree. Resources referenced by consumers can still be shared.
+local data = require '@dream/data'
 
 -- 2^24: 24 bits of slot, remaining exact integer bits for generation.
 local HandleStride = 16777216
@@ -18,6 +19,8 @@ local MetaGeneration = 16
 local MetaMask = 20
 local MetaFlags = 24
 local MetaDepth = 28
+-- A node's depth as the data plane reads it: a u32 that far into each record of the metadata.
+local DepthField = `u32@{MetaStride}+{MetaDepth}`
 
 local Alive = 1
 local TransformDirty = 2
@@ -25,6 +28,7 @@ local OwnBounds = 4
 local Enabled = 8
 local BoundsDirty = 16
 local OwnBoundsDirty = 32
+local AliveBoundsDirty = bit32.bor(Alive, BoundsDirty)
 
 -- Position xyz, rotation quaternion xyzw, scale xyz.
 local LocalStride = 40
@@ -76,7 +80,9 @@ type Fields = {
   _dirtyTransformCount: number,
   _dirtyBounds: { number },
   _dirtyBoundsCount: number,
-  _remainingBounds: { number },
+  _remaining: buffer,
+  _depthKeys: buffer,
+  _depthOrder: buffer,
 }
 
 local Scene = {}
@@ -189,7 +195,9 @@ function Scene.new(initialCapacity: number?): Scene
     _dirtyTransformCount = 0,
     _dirtyBounds = table.create(256),
     _dirtyBoundsCount = 0,
-    _remainingBounds = table.create(64),
+    _remaining = buffer.create(256),
+    _depthKeys = buffer.create(256),
+    _depthOrder = buffer.create(256),
   }, Scene)
 
   return self
@@ -900,27 +908,37 @@ function Scene.update(self: Scene): UpdateCounts
     buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.band(flags, bit32.bnot(BoundsDirty)))
   end
 
-  -- What remains are ancestors of changed subtrees or bounds-only edits. Depth order guarantees
-  -- children first.
-  local remaining = self._remainingBounds
-  table.clear(remaining)
+  -- What remains are ancestors of changed subtrees or bounds-only edits. Deepest first folds
+  -- every child before its parent, and nodes of one depth read nothing of each other, so depth
+  -- alone orders them.
+  if buffer.len(self._remaining) < dirtyBoundsCount * 4 then
+    local bytes = buffer.len(self._remaining)
 
-  for index = 1, dirtyBoundsCount do
-    local slot = dirtyBounds[index]
-    local flags = buffer.readu32(self._meta, slot * MetaStride + MetaFlags)
+    repeat
+      bytes *= 2
+    until bytes >= dirtyBoundsCount * 4
 
-    if bit32.band(flags, bit32.bor(Alive, BoundsDirty)) == bit32.bor(Alive, BoundsDirty) then
-      remaining[#remaining + 1] = slot
-    end
+    self._remaining = buffer.create(bytes)
+    self._depthKeys = buffer.create(bytes)
+    self._depthOrder = buffer.create(bytes)
   end
 
-  table.sort(remaining, function(left: number, right: number): boolean
-    return buffer.readu32(self._meta, left * MetaStride + MetaDepth)
-      > buffer.readu32(self._meta, right * MetaStride + MetaDepth)
-  end)
+  local meta, depthOrder = self._meta, self._depthOrder
+  local remaining, remainingCount = into(self._remaining, 'u32')[
+    for slot in dirtyBounds[1:dirtyBoundsCount]
+    if bit32.band(buffer.readu32(meta, slot * MetaStride + MetaFlags), AliveBoundsDirty) == AliveBoundsDirty
+    => slot
+  ]
 
-  for index = 1, #remaining do
-    local slot = remaining[index]
+  if remainingCount > 1 then
+    data.gather(meta, DepthField, 0, self._high + 1, remaining, self._depthKeys, 0, remainingCount)
+    data.argsort(self._depthKeys, 'u32', 0, remainingCount, depthOrder)
+  else
+    buffer.writeu32(depthOrder, 0, 0)
+  end
+
+  for index = remainingCount - 1, 0, -1 do
+    local slot = buffer.readu32(remaining, buffer.readu32(depthOrder, index * 4) * 4)
     local metaOffset = slot * MetaStride
     local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
 
