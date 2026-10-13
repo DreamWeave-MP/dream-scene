@@ -207,24 +207,24 @@ function Scene.new(initialCapacity: number?): Scene
   return self
 end
 
-function Scene._ensure(self: Scene, slot: number)
-  if slot <= self._capacity then return end
+local function ensure(scene: Scene, slot: number)
+  if slot <= scene._capacity then return end
 
-  local capacity = self._capacity
+  local capacity = scene._capacity
 
   repeat
     capacity *= 2
     assert(capacity <= MaxSlot, 'scene: node capacity exhausted')
   until capacity >= slot
 
-  self._meta = growBuffer(self._meta, (capacity + 1) * MetaStride)
-  self._local = growBuffer(self._local, (capacity + 1) * LocalStride)
-  self._world = growBuffer(self._world, (capacity + 1) * MatrixStride)
-  self._localBounds = growBuffer(self._localBounds, (capacity + 1) * BoundsStride)
-  self._ownWorldBounds = growBuffer(self._ownWorldBounds, (capacity + 1) * BoundsStride)
-  self._subtreeBounds = growBuffer(self._subtreeBounds, (capacity + 1) * BoundsStride)
-  self._range = growBuffer(self._range, (capacity + 1) * RangeStride)
-  self._capacity = capacity
+  scene._meta = growBuffer(scene._meta, (capacity + 1) * MetaStride)
+  scene._local = growBuffer(scene._local, (capacity + 1) * LocalStride)
+  scene._world = growBuffer(scene._world, (capacity + 1) * MatrixStride)
+  scene._localBounds = growBuffer(scene._localBounds, (capacity + 1) * BoundsStride)
+  scene._ownWorldBounds = growBuffer(scene._ownWorldBounds, (capacity + 1) * BoundsStride)
+  scene._subtreeBounds = growBuffer(scene._subtreeBounds, (capacity + 1) * BoundsStride)
+  scene._range = growBuffer(scene._range, (capacity + 1) * RangeStride)
+  scene._capacity = capacity
 end
 
 function Scene._slot(self: Scene, handle: number): number
@@ -265,13 +265,13 @@ function Scene.isAlive(self: Scene, handle: number): boolean
   return liveSlot(self._meta, self._high, handle) ~= 0
 end
 
-function Scene._queueBounds(self: Scene, slot: number)
-  if self._batchDepth > 0 then
-    self._fullDirty = true
+local function queueBounds(scene: Scene, slot: number)
+  if scene._batchDepth > 0 then
+    scene._fullDirty = true
     return
   end
 
-  local { _meta: meta, _dirtyBounds: dirtyBounds, _dirtyBoundsCount: count } = self
+  local { _meta: meta, _dirtyBounds: dirtyBounds, _dirtyBoundsCount: count } = scene
 
   while slot ~= 0 do
     local metaOffset = slot * MetaStride
@@ -286,36 +286,36 @@ function Scene._queueBounds(self: Scene, slot: number)
     slot = buffer.readi32(meta, metaOffset + MetaParent)
   end
 
-  self._dirtyBoundsCount = count
+  scene._dirtyBoundsCount = count
 end
 
-function Scene._markTransform(self: Scene, slot: number)
-  local meta = self._meta
+local function markTransform(scene: Scene, slot: number)
+  local meta = scene._meta
   local metaOffset = slot * MetaStride
   local flags = buffer.readu32(meta, metaOffset + MetaFlags)
 
   if bit32.band(flags, TransformDirty) == 0 then
     buffer.writeu32(meta, metaOffset + MetaFlags, bit32.bor(flags, TransformDirty))
 
-    if self._batchDepth == 0 then
-      local count = self._dirtyTransformCount + 1
-      self._dirtyTransforms[count] = slot
-      self._dirtyTransformCount = count
+    if scene._batchDepth == 0 then
+      local count = scene._dirtyTransformCount + 1
+      scene._dirtyTransforms[count] = slot
+      scene._dirtyTransformCount = count
     else
-      self._fullDirty = true
+      scene._fullDirty = true
     end
-  elseif self._batchDepth > 0 then
-    self._fullDirty = true
+  elseif scene._batchDepth > 0 then
+    scene._fullDirty = true
   end
 
-  self:_queueBounds(slot)
+  queueBounds(scene, slot)
 end
 
-function Scene._markOwnBounds(self: Scene, slot: number)
-  local meta = self._meta
+local function markOwnBounds(scene: Scene, slot: number)
+  local meta = scene._meta
   local metaOffset = slot * MetaStride
   buffer.writeu32(meta, metaOffset + MetaFlags, bit32.bor(buffer.readu32(meta, metaOffset + MetaFlags), OwnBoundsDirty))
-  self:_queueBounds(slot)
+  queueBounds(scene, slot)
 end
 
 --- Places a node's own box in the world: the box the axes fit around its local box once its
@@ -418,8 +418,8 @@ local function foldSubtreeBounds(
   buffer.writef32(subtreeBounds, boundsOffset + 20, maxZ)
 end
 
-function Scene._unlink(self: Scene, slot: number)
-  local meta = self._meta
+local function unlink(scene: Scene, slot: number)
+  local meta = scene._meta
   local metaOffset = slot * MetaStride
   local parent = buffer.readi32(meta, metaOffset + MetaParent)
   local previous = buffer.readi32(meta, metaOffset + MetaPrevious)
@@ -430,10 +430,10 @@ function Scene._unlink(self: Scene, slot: number)
   elseif parent ~= 0 then
     buffer.writei32(meta, parent * MetaStride + MetaFirstChild, nextNode)
   else
-    self._firstRoot = nextNode
+    scene._firstRoot = nextNode
   end
 
-  if parent == 0 then self._roots -= 1 end
+  if parent == 0 then scene._roots -= 1 end
 
   if nextNode ~= 0 then buffer.writei32(meta, nextNode * MetaStride + MetaPrevious, previous) end
 
@@ -442,8 +442,8 @@ function Scene._unlink(self: Scene, slot: number)
   buffer.writei32(meta, metaOffset + MetaNext, 0)
 end
 
-function Scene._link(self: Scene, slot: number, parent: number)
-  local meta = self._meta
+local function link(scene: Scene, slot: number, parent: number)
+  local meta = scene._meta
   local metaOffset = slot * MetaStride
   buffer.writei32(meta, metaOffset + MetaParent, parent)
   local depth = 0
@@ -462,13 +462,13 @@ function Scene._link(self: Scene, slot: number, parent: number)
 
     buffer.writei32(meta, parentOffset + MetaFirstChild, slot)
   else
-    local first = self._firstRoot
+    local first = scene._firstRoot
     buffer.writei32(meta, metaOffset + MetaNext, first)
 
     if first ~= 0 then buffer.writei32(meta, first * MetaStride + MetaPrevious, slot) end
 
-    self._firstRoot = slot
-    self._roots += 1
+    scene._firstRoot = slot
+    scene._roots += 1
   end
 end
 
@@ -480,7 +480,7 @@ function Scene.create(self: Scene, parentHandle: number?): number
     self._free = buffer.readi32(self._meta, slot * MetaStride + MetaNext)
   else
     slot = self._high + 1
-    self:_ensure(slot)
+    ensure(self, slot)
     self._high = slot
     buffer.writeu32(self._meta, slot * MetaStride + MetaGeneration, 1)
   end
@@ -534,13 +534,13 @@ function Scene.create(self: Scene, parentHandle: number?): number
   -- it among the roots and moving it would. Any other parent is setParent's to refuse, in its
   -- own words, with the node left a root.
   if parent ~= 0 and parent ~= slot then
-    self:_link(slot, parent)
-    self:_queueBounds(slot)
+    link(self, slot, parent)
+    queueBounds(self, slot)
 
     return handle
   end
 
-  self:_link(slot, 0)
+  link(self, slot, 0)
 
   if parentHandle then self:setParent(handle, parentHandle) end
 
@@ -551,9 +551,9 @@ function Scene.destroy(self: Scene, handle: number): number
   local root = self:_slot(handle)
   local { _meta: meta, _stack: stack, _order: order } = self
   local oldParent = buffer.readi32(meta, root * MetaStride + MetaParent)
-  self:_unlink(root)
+  unlink(self, root)
 
-  if oldParent ~= 0 then self:_queueBounds(oldParent) end
+  if oldParent ~= 0 then queueBounds(self, oldParent) end
 
   local top = 1
   stack[1] = root
@@ -616,12 +616,12 @@ function Scene.setParent(self: Scene, handle: number, parentHandle: number?)
   local current = buffer.readi32(meta, slot * MetaStride + MetaParent)
   if current == parent then return end
 
-  self:_unlink(slot)
+  unlink(self, slot)
 
-  if current ~= 0 then self:_queueBounds(current) end
+  if current ~= 0 then queueBounds(self, current) end
 
-  self:_link(slot, parent)
-  self:_markTransform(slot)
+  link(self, slot, parent)
+  markTransform(self, slot)
 end
 
 function Scene.parent(self: Scene, handle: number): number?
@@ -660,7 +660,7 @@ function Scene.setTransform(
   buffer.writef32(transforms, localOffset + LocalScaleX, scaleX)
   buffer.writef32(transforms, localOffset + LocalScaleY, scaleY)
   buffer.writef32(transforms, localOffset + LocalScaleZ, scaleZ)
-  self:_markTransform(slot)
+  markTransform(self, slot)
 end
 
 function Scene.setPosition(self: Scene, handle: number, positionX: number, positionY: number, positionZ: number)
@@ -670,7 +670,7 @@ function Scene.setPosition(self: Scene, handle: number, positionX: number, posit
   buffer.writef32(transforms, localOffset + LocalPositionX, positionX)
   buffer.writef32(transforms, localOffset + LocalPositionY, positionY)
   buffer.writef32(transforms, localOffset + LocalPositionZ, positionZ)
-  self:_markTransform(slot)
+  markTransform(self, slot)
 end
 
 function Scene.setRotation(
@@ -688,7 +688,7 @@ function Scene.setRotation(
   buffer.writef32(transforms, localOffset + LocalRotationY, rotationY)
   buffer.writef32(transforms, localOffset + LocalRotationZ, rotationZ)
   buffer.writef32(transforms, localOffset + LocalRotationW, rotationW)
-  self:_markTransform(slot)
+  markTransform(self, slot)
 end
 
 function Scene.setScale(self: Scene, handle: number, scaleX: number, scaleY: number, scaleZ: number)
@@ -698,7 +698,7 @@ function Scene.setScale(self: Scene, handle: number, scaleX: number, scaleY: num
   buffer.writef32(transforms, localOffset + LocalScaleX, scaleX)
   buffer.writef32(transforms, localOffset + LocalScaleY, scaleY)
   buffer.writef32(transforms, localOffset + LocalScaleZ, scaleZ)
-  self:_markTransform(slot)
+  markTransform(self, slot)
 end
 
 function Scene.setBounds(
@@ -723,7 +723,7 @@ function Scene.setBounds(
   buffer.writef32(localBounds, boundsOffset + 20, maxZ)
   local metaOffset = slot * MetaStride
   buffer.writeu32(meta, metaOffset + MetaFlags, bit32.bor(buffer.readu32(meta, metaOffset + MetaFlags), OwnBounds))
-  self:_markOwnBounds(slot)
+  markOwnBounds(self, slot)
 end
 
 function Scene.clearBounds(self: Scene, handle: number)
@@ -735,7 +735,7 @@ function Scene.clearBounds(self: Scene, handle: number)
     metaOffset + MetaFlags,
     bit32.band(buffer.readu32(meta, metaOffset + MetaFlags), bit32.bnot(OwnBounds))
   )
-  self:_markOwnBounds(slot)
+  markOwnBounds(self, slot)
 end
 
 function Scene.setMask(self: Scene, handle: number, mask: number)
