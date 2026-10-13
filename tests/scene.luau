@@ -965,6 +965,27 @@ suite.describe('growth', function()
     expect(world:create()).toBe(handleOf(5001, 2))
   end)
 
+  suite.it('places a slot made over and over between updates once for each making', function()
+    local world = scene.new(16)
+    local parent = world:create()
+    world:update()
+    local node = world:create(parent)
+
+    for _ = 1, 500 do
+      world:destroy(node)
+      node = world:create(parent)
+      boxed(world, node)
+      boxed(world, world:create(node))
+      world:create(node)
+    end
+
+    expect(world:stats().nodes).toBe(4)
+    expect(world:stats().highWaterSlots).toBe(4)
+    expect(world:update()).toEqual(counts(1500, 1000, 1501))
+    expect(world:update()).toEqual(counts(0, 0, 0))
+    expect(#world:queryAabb(0, 0, 0, 0, 0, 0)).toBe(2)
+  end)
+
   suite.it('folds bounds up a chain three thousand deep', function()
     local world = scene.new(16)
     local made = table.create(3000)
