@@ -1,17 +1,31 @@
+--!strict
 --!native
-local scene=require('@dream/scene')
-local n=tonumber(arg[1]) or 100000
-local batch=(arg[2] or 'batch')=='batch'
-local s=scene.new(n)
-if batch then s:beginBatch() end
-local roots={}
-local groups=math.max(1,math.floor(n/64))
-for g=1,groups do local h=s:create(); roots[g]=h; s:setPosition(h,(g%64)*128,math.floor(g/64)*128,0) end
-for i=1,n-groups do
-    local h=s:create(roots[((i-1)%groups)+1])
-    s:setPosition(h,(i%16)*4,(math.floor(i/16)%16)*4,(i%7)*0.5)
-    s:setBounds(h,-1,-1,-1,1,1,1)
+-- The build of a flat world of cells and its first update, for `jess run --profile`:
+-- `jess run --profile --package . bench/profile_build.luau [nodes] [batch|incremental]`.
+local scene = require '@dream/scene'
+
+local nodes = tonumber(arg[1]) or 100000
+local batched = (arg[2] or 'batch') == 'batch'
+local world = scene.new(nodes)
+local cellCount = math.max(1, nodes // 64)
+local cells = table.create(cellCount)
+
+if batched then world:beginBatch() end
+
+for index = 1, cellCount do
+  local cell = world:create()
+  cells[index] = cell
+  world:setPosition(cell, index % 64 * 128, index // 64 * 128, 0)
 end
-if batch then s:endBatch() end
-local u=s:update()
-print('build',n,batch,u.transformsUpdated,u.boundsUpdated,s:stats().packedBytes)
+
+for index = 1, nodes - cellCount do
+  local leaf = world:create(cells[(index - 1) % cellCount + 1])
+  world:setPosition(leaf, index % 16 * 4, index // 16 % 16 * 4, index % 7 * 0.5)
+  world:setBounds(leaf, -1, -1, -1, 1, 1, 1)
+end
+
+if batched then world:endBatch() end
+
+local updated = world:update()
+
+print('build', nodes, batched, updated.transformsUpdated, updated.boundsUpdated, world:stats().packedBytes)
