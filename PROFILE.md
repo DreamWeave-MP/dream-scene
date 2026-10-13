@@ -2,7 +2,7 @@
 
 All measurements were produced by the supplied Jess binary on this execution environment. Timings are workload medians where the benchmark says so; treat them as comparative engineering data, not portable hardware promises.
 
-Raw data is under `bench/results/` and the benchmark/profiler scripts are under `bench/`.
+Raw data is under `bench/results/` and the profiler scripts are under `bench/`. The benchmark that printed those tables has since been replaced by one that checks every answer it times; its numbers, on l3i 2.0, are in `BENCHMARKS.md`, and nothing below has been remeasured.
 
 ## Packed memory
 
