@@ -32,6 +32,7 @@ local AliveBoundsDirty = bit32.bor(Alive, BoundsDirty)
 local AliveTransformDirty = bit32.bor(Alive, TransformDirty)
 local NotBoundsDirty = bit32.bnot(BoundsDirty)
 local NotTransformOrOwnBoundsDirty = bit32.bnot(bit32.bor(TransformDirty, OwnBoundsDirty))
+local NotDirty = bit32.bnot(bit32.bor(TransformDirty, OwnBoundsDirty, BoundsDirty))
 
 -- Position xyz, rotation quaternion xyzw, scale xyz.
 local LocalStride = 40
@@ -318,8 +319,14 @@ function Scene._markOwnBounds(self: Scene, slot: number)
 end
 
 --- Places a node's own box in the world: the box the axes fit around its local box once its
---- world matrix, as the buffer holds it, has turned and stretched it.
-local function placeOwnBounds(localBounds: buffer, world: buffer, ownWorldBounds: buffer, slot: number)
+--- world matrix, as the buffer holds it, has turned and stretched it. Returns the box, min then
+--- max, before the buffer rounds it.
+local function placeOwnBounds(
+  localBounds: buffer,
+  world: buffer,
+  ownWorldBounds: buffer,
+  slot: number
+): (number, number, number, number, number, number)
   local boundsOffset = slot * BoundsStride
   local minX = buffer.readf32(localBounds, boundsOffset)
   local minY = buffer.readf32(localBounds, boundsOffset + 4)
@@ -348,12 +355,18 @@ local function placeOwnBounds(localBounds: buffer, world: buffer, ownWorldBounds
   local worldExtentX = math.abs(world00) * extentX + math.abs(world01) * extentY + math.abs(world02) * extentZ
   local worldExtentY = math.abs(world10) * extentX + math.abs(world11) * extentY + math.abs(world12) * extentZ
   local worldExtentZ = math.abs(world20) * extentX + math.abs(world21) * extentY + math.abs(world22) * extentZ
-  buffer.writef32(ownWorldBounds, boundsOffset, worldCenterX - worldExtentX)
-  buffer.writef32(ownWorldBounds, boundsOffset + 4, worldCenterY - worldExtentY)
-  buffer.writef32(ownWorldBounds, boundsOffset + 8, worldCenterZ - worldExtentZ)
-  buffer.writef32(ownWorldBounds, boundsOffset + 12, worldCenterX + worldExtentX)
-  buffer.writef32(ownWorldBounds, boundsOffset + 16, worldCenterY + worldExtentY)
-  buffer.writef32(ownWorldBounds, boundsOffset + 20, worldCenterZ + worldExtentZ)
+  local worldMinX, worldMinY, worldMinZ =
+    worldCenterX - worldExtentX, worldCenterY - worldExtentY, worldCenterZ - worldExtentZ
+  local worldMaxX, worldMaxY, worldMaxZ =
+    worldCenterX + worldExtentX, worldCenterY + worldExtentY, worldCenterZ + worldExtentZ
+  buffer.writef32(ownWorldBounds, boundsOffset, worldMinX)
+  buffer.writef32(ownWorldBounds, boundsOffset + 4, worldMinY)
+  buffer.writef32(ownWorldBounds, boundsOffset + 8, worldMinZ)
+  buffer.writef32(ownWorldBounds, boundsOffset + 12, worldMaxX)
+  buffer.writef32(ownWorldBounds, boundsOffset + 16, worldMaxY)
+  buffer.writef32(ownWorldBounds, boundsOffset + 20, worldMaxZ)
+
+  return worldMinX, worldMinY, worldMinZ, worldMaxX, worldMaxY, worldMaxZ
 end
 
 --- Folds a node's own box, when `flags` say it has one, and its children's subtree boxes into
@@ -834,7 +847,7 @@ function Scene.update(self: Scene): UpdateCounts
     end
   end
 
-  local visited = 0
+  local visited, parents = 0, 0
   local boundedNodes = 0
 
   -- Every descendant of a dirty transform root inherits a new world transform.
@@ -844,7 +857,6 @@ function Scene.update(self: Scene): UpdateCounts
     local metaOffset = slot * MetaStride
     local flags = buffer.readu32(meta, metaOffset + MetaFlags)
     visited += 1
-    order[visited] = slot
 
     local parent = buffer.readi32(meta, metaOffset + MetaParent)
     local depth = 0
@@ -931,24 +943,48 @@ function Scene.update(self: Scene): UpdateCounts
       )
     end
 
+    local child = buffer.readi32(meta, metaOffset + MetaFirstChild)
+
+    -- A node with no children has nothing to wait for: its subtree box is its own, or none. The
+    -- buffer rounds the box alike wherever it is written, so this is the box a fold would copy.
+    if child == 0 then
+      local minX, minY, minZ = math.huge, math.huge, math.huge
+      local maxX, maxY, maxZ = -math.huge, -math.huge, -math.huge
+
+      if bit32.band(flags, OwnBounds) ~= 0 then
+        minX, minY, minZ, maxX, maxY, maxZ = placeOwnBounds(localBounds, world, ownWorldBounds, slot)
+        boundedNodes += 1
+      end
+
+      local boundsOffset = slot * BoundsStride
+      buffer.writef32(subtreeBounds, boundsOffset, minX)
+      buffer.writef32(subtreeBounds, boundsOffset + 4, minY)
+      buffer.writef32(subtreeBounds, boundsOffset + 8, minZ)
+      buffer.writef32(subtreeBounds, boundsOffset + 12, maxX)
+      buffer.writef32(subtreeBounds, boundsOffset + 16, maxY)
+      buffer.writef32(subtreeBounds, boundsOffset + 20, maxZ)
+      buffer.writeu32(meta, metaOffset + MetaFlags, bit32.band(flags, NotDirty))
+      continue
+    end
+
     if bit32.band(flags, OwnBounds) ~= 0 then
       placeOwnBounds(localBounds, world, ownWorldBounds, slot)
       boundedNodes += 1
     end
 
     buffer.writeu32(meta, metaOffset + MetaFlags, bit32.band(flags, NotTransformOrOwnBoundsDirty))
+    parents += 1
+    order[parents] = slot
 
-    local child = buffer.readi32(meta, metaOffset + MetaFirstChild)
-
-    while child ~= 0 do
+    repeat
       top += 1
       stack[top] = child
       child = buffer.readi32(meta, child * MetaStride + MetaNext)
-    end
+    until child == 0
   end
 
-  -- Dirty transform subtrees are complete; fold their bounds bottom-up.
-  for index = visited, 1, -1 do
+  -- Dirty transform subtrees are complete; fold the bounds of those with children bottom-up.
+  for index = parents, 1, -1 do
     local slot = order[index]
     local metaOffset = slot * MetaStride
     local flags = buffer.readu32(meta, metaOffset + MetaFlags)
