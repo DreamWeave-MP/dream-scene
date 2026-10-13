@@ -243,15 +243,25 @@ function Scene._slot(self: Scene, handle: number): number
   return slot
 end
 
-function Scene.isAlive(self: Scene, handle: number): boolean
+--- The slot a handle names, or zero when it names no live node.
+local function liveSlot(meta: buffer, high: number, handle: number): number
   local slot, generation = decode(handle)
-  if slot <= 0 or slot > self._high then return false end
+  if slot <= 0 or slot > high then return 0 end
 
-  local meta = self._meta
   local metaOffset = slot * MetaStride
 
-  return bit32.band(buffer.readu32(meta, metaOffset + MetaFlags), Alive) ~= 0
-    and buffer.readu32(meta, metaOffset + MetaGeneration) == generation
+  if
+    bit32.band(buffer.readu32(meta, metaOffset + MetaFlags), Alive) == 0
+    or buffer.readu32(meta, metaOffset + MetaGeneration) ~= generation
+  then
+    return 0
+  end
+
+  return slot
+end
+
+function Scene.isAlive(self: Scene, handle: number): boolean
+  return liveSlot(self._meta, self._high, handle) ~= 0
 end
 
 function Scene._queueBounds(self: Scene, slot: number)
@@ -503,9 +513,21 @@ function Scene.create(self: Scene, parentHandle: number?): number
   buffer.writef32(ranges, rangeOffset, 0)
   buffer.writef32(ranges, rangeOffset + 4, math.huge)
 
-  self:_link(slot, 0)
   self._count += 1
   local handle = encode(slot, generation)
+  local parent = if parentHandle then liveSlot(meta, self._high, parentHandle) else 0
+
+  -- Under a live parent the node is linked straight there, which leaves every list as linking
+  -- it among the roots and moving it would. Any other parent is setParent's to refuse, in its
+  -- own words, with the node left a root.
+  if parent ~= 0 and parent ~= slot then
+    self:_link(slot, parent)
+    self:_queueBounds(slot)
+
+    return handle
+  end
+
+  self:_link(slot, 0)
 
   if parentHandle then self:setParent(handle, parentHandle) end
 
