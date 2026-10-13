@@ -230,12 +230,12 @@ function Scene._slot(self: Scene, handle: number): number
   local slot, generation = decode(handle)
   if slot <= 0 or slot > self._high then error('scene: invalid node handle', 3) end
 
+  local meta = self._meta
   local metaOffset = slot * MetaStride
-  local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
 
   if
-    bit32.band(flags, Alive) == 0
-    or buffer.readu32(self._meta, metaOffset + MetaGeneration) ~= generation
+    bit32.band(buffer.readu32(meta, metaOffset + MetaFlags), Alive) == 0
+    or buffer.readu32(meta, metaOffset + MetaGeneration) ~= generation
   then
     error('scene: stale node handle', 3)
   end
@@ -247,14 +247,11 @@ function Scene.isAlive(self: Scene, handle: number): boolean
   local slot, generation = decode(handle)
   if slot <= 0 or slot > self._high then return false end
 
+  local meta = self._meta
   local metaOffset = slot * MetaStride
 
-  return bit32.band(buffer.readu32(self._meta, metaOffset + MetaFlags), Alive) ~= 0
-    and buffer.readu32(self._meta, metaOffset + MetaGeneration) == generation
-end
-
-function Scene._handle(self: Scene, slot: number): number
-  return encode(slot, buffer.readu32(self._meta, slot * MetaStride + MetaGeneration))
+  return bit32.band(buffer.readu32(meta, metaOffset + MetaFlags), Alive) ~= 0
+    and buffer.readu32(meta, metaOffset + MetaGeneration) == generation
 end
 
 function Scene._queueBounds(self: Scene, slot: number)
@@ -263,27 +260,31 @@ function Scene._queueBounds(self: Scene, slot: number)
     return
   end
 
+  local { _meta: meta, _dirtyBounds: dirtyBounds, _dirtyBoundsCount: count } = self
+
   while slot ~= 0 do
     local metaOffset = slot * MetaStride
-    local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
+    local flags = buffer.readu32(meta, metaOffset + MetaFlags)
 
     if bit32.band(flags, BoundsDirty) == 0 then
-      buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.bor(flags, BoundsDirty))
-      local count = self._dirtyBoundsCount + 1
-      self._dirtyBounds[count] = slot
-      self._dirtyBoundsCount = count
+      buffer.writeu32(meta, metaOffset + MetaFlags, bit32.bor(flags, BoundsDirty))
+      count += 1
+      dirtyBounds[count] = slot
     end
 
-    slot = buffer.readi32(self._meta, metaOffset + MetaParent)
+    slot = buffer.readi32(meta, metaOffset + MetaParent)
   end
+
+  self._dirtyBoundsCount = count
 end
 
 function Scene._markTransform(self: Scene, slot: number)
+  local meta = self._meta
   local metaOffset = slot * MetaStride
-  local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
+  local flags = buffer.readu32(meta, metaOffset + MetaFlags)
 
   if bit32.band(flags, TransformDirty) == 0 then
-    buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.bor(flags, TransformDirty))
+    buffer.writeu32(meta, metaOffset + MetaFlags, bit32.bor(flags, TransformDirty))
 
     if self._batchDepth == 0 then
       local count = self._dirtyTransformCount + 1
@@ -300,9 +301,9 @@ function Scene._markTransform(self: Scene, slot: number)
 end
 
 function Scene._markOwnBounds(self: Scene, slot: number)
+  local meta = self._meta
   local metaOffset = slot * MetaStride
-  local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
-  buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.bor(flags, OwnBoundsDirty))
+  buffer.writeu32(meta, metaOffset + MetaFlags, bit32.bor(buffer.readu32(meta, metaOffset + MetaFlags), OwnBoundsDirty))
   self:_queueBounds(slot)
 end
 
@@ -395,51 +396,53 @@ local function foldSubtreeBounds(
 end
 
 function Scene._unlink(self: Scene, slot: number)
+  local meta = self._meta
   local metaOffset = slot * MetaStride
-  local parent = buffer.readi32(self._meta, metaOffset + MetaParent)
-  local previous = buffer.readi32(self._meta, metaOffset + MetaPrevious)
-  local nextNode = buffer.readi32(self._meta, metaOffset + MetaNext)
+  local parent = buffer.readi32(meta, metaOffset + MetaParent)
+  local previous = buffer.readi32(meta, metaOffset + MetaPrevious)
+  local nextNode = buffer.readi32(meta, metaOffset + MetaNext)
 
   if previous ~= 0 then
-    buffer.writei32(self._meta, previous * MetaStride + MetaNext, nextNode)
+    buffer.writei32(meta, previous * MetaStride + MetaNext, nextNode)
   elseif parent ~= 0 then
-    buffer.writei32(self._meta, parent * MetaStride + MetaFirstChild, nextNode)
+    buffer.writei32(meta, parent * MetaStride + MetaFirstChild, nextNode)
   else
     self._firstRoot = nextNode
   end
 
   if parent == 0 then self._roots -= 1 end
 
-  if nextNode ~= 0 then buffer.writei32(self._meta, nextNode * MetaStride + MetaPrevious, previous) end
+  if nextNode ~= 0 then buffer.writei32(meta, nextNode * MetaStride + MetaPrevious, previous) end
 
-  buffer.writei32(self._meta, metaOffset + MetaParent, 0)
-  buffer.writei32(self._meta, metaOffset + MetaPrevious, 0)
-  buffer.writei32(self._meta, metaOffset + MetaNext, 0)
+  buffer.writei32(meta, metaOffset + MetaParent, 0)
+  buffer.writei32(meta, metaOffset + MetaPrevious, 0)
+  buffer.writei32(meta, metaOffset + MetaNext, 0)
 end
 
 function Scene._link(self: Scene, slot: number, parent: number)
+  local meta = self._meta
   local metaOffset = slot * MetaStride
-  buffer.writei32(self._meta, metaOffset + MetaParent, parent)
+  buffer.writei32(meta, metaOffset + MetaParent, parent)
   local depth = 0
 
-  if parent ~= 0 then depth = buffer.readu32(self._meta, parent * MetaStride + MetaDepth) + 1 end
+  if parent ~= 0 then depth = buffer.readu32(meta, parent * MetaStride + MetaDepth) + 1 end
 
-  buffer.writeu32(self._meta, metaOffset + MetaDepth, depth)
-  buffer.writei32(self._meta, metaOffset + MetaPrevious, 0)
+  buffer.writeu32(meta, metaOffset + MetaDepth, depth)
+  buffer.writei32(meta, metaOffset + MetaPrevious, 0)
 
   if parent ~= 0 then
     local parentOffset = parent * MetaStride
-    local first = buffer.readi32(self._meta, parentOffset + MetaFirstChild)
-    buffer.writei32(self._meta, metaOffset + MetaNext, first)
+    local first = buffer.readi32(meta, parentOffset + MetaFirstChild)
+    buffer.writei32(meta, metaOffset + MetaNext, first)
 
-    if first ~= 0 then buffer.writei32(self._meta, first * MetaStride + MetaPrevious, slot) end
+    if first ~= 0 then buffer.writei32(meta, first * MetaStride + MetaPrevious, slot) end
 
-    buffer.writei32(self._meta, parentOffset + MetaFirstChild, slot)
+    buffer.writei32(meta, parentOffset + MetaFirstChild, slot)
   else
     local first = self._firstRoot
-    buffer.writei32(self._meta, metaOffset + MetaNext, first)
+    buffer.writei32(meta, metaOffset + MetaNext, first)
 
-    if first ~= 0 then buffer.writei32(self._meta, first * MetaStride + MetaPrevious, slot) end
+    if first ~= 0 then buffer.writei32(meta, first * MetaStride + MetaPrevious, slot) end
 
     self._firstRoot = slot
     self._roots += 1
@@ -459,22 +462,24 @@ function Scene.create(self: Scene, parentHandle: number?): number
     buffer.writeu32(self._meta, slot * MetaStride + MetaGeneration, 1)
   end
 
+  -- Read once the scene has grown, which replaces every buffer.
+  local { _meta: meta, _local: transforms, _range: ranges } = self
   local metaOffset = slot * MetaStride
-  local generation = buffer.readu32(self._meta, metaOffset + MetaGeneration)
+  local generation = buffer.readu32(meta, metaOffset + MetaGeneration)
 
   if generation == 0 then
     generation = 1
-    buffer.writeu32(self._meta, metaOffset + MetaGeneration, generation)
+    buffer.writeu32(meta, metaOffset + MetaGeneration, generation)
   end
 
-  buffer.writei32(self._meta, metaOffset + MetaFirstChild, 0)
-  buffer.writeu32(self._meta, metaOffset + MetaMask, 0xffffffff)
+  buffer.writei32(meta, metaOffset + MetaFirstChild, 0)
+  buffer.writeu32(meta, metaOffset + MetaMask, 0xffffffff)
 
   if self._batchDepth > 0 then
-    buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.bor(Alive, TransformDirty, Enabled))
+    buffer.writeu32(meta, metaOffset + MetaFlags, bit32.bor(Alive, TransformDirty, Enabled))
     self._fullDirty = true
   else
-    buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.bor(Alive, TransformDirty, Enabled, BoundsDirty))
+    buffer.writeu32(meta, metaOffset + MetaFlags, bit32.bor(Alive, TransformDirty, Enabled, BoundsDirty))
     local transformCount, boundsCount = self._dirtyTransformCount + 1, self._dirtyBoundsCount + 1
     self._dirtyTransforms[transformCount] = slot
     self._dirtyTransformCount = transformCount
@@ -483,20 +488,20 @@ function Scene.create(self: Scene, parentHandle: number?): number
   end
 
   local localOffset = slot * LocalStride
-  buffer.writef32(self._local, localOffset + LocalPositionX, 0)
-  buffer.writef32(self._local, localOffset + LocalPositionY, 0)
-  buffer.writef32(self._local, localOffset + LocalPositionZ, 0)
-  buffer.writef32(self._local, localOffset + LocalRotationX, 0)
-  buffer.writef32(self._local, localOffset + LocalRotationY, 0)
-  buffer.writef32(self._local, localOffset + LocalRotationZ, 0)
-  buffer.writef32(self._local, localOffset + LocalRotationW, 1)
-  buffer.writef32(self._local, localOffset + LocalScaleX, 1)
-  buffer.writef32(self._local, localOffset + LocalScaleY, 1)
-  buffer.writef32(self._local, localOffset + LocalScaleZ, 1)
+  buffer.writef32(transforms, localOffset + LocalPositionX, 0)
+  buffer.writef32(transforms, localOffset + LocalPositionY, 0)
+  buffer.writef32(transforms, localOffset + LocalPositionZ, 0)
+  buffer.writef32(transforms, localOffset + LocalRotationX, 0)
+  buffer.writef32(transforms, localOffset + LocalRotationY, 0)
+  buffer.writef32(transforms, localOffset + LocalRotationZ, 0)
+  buffer.writef32(transforms, localOffset + LocalRotationW, 1)
+  buffer.writef32(transforms, localOffset + LocalScaleX, 1)
+  buffer.writef32(transforms, localOffset + LocalScaleY, 1)
+  buffer.writef32(transforms, localOffset + LocalScaleZ, 1)
 
   local rangeOffset = slot * RangeStride
-  buffer.writef32(self._range, rangeOffset, 0)
-  buffer.writef32(self._range, rangeOffset + 4, math.huge)
+  buffer.writef32(ranges, rangeOffset, 0)
+  buffer.writef32(ranges, rangeOffset + 4, math.huge)
 
   self:_link(slot, 0)
   self._count += 1
@@ -559,6 +564,7 @@ end
 
 function Scene.setParent(self: Scene, handle: number, parentHandle: number?)
   local slot = self:_slot(handle)
+  local meta = self._meta
   local parent = 0
 
   if parentHandle then
@@ -568,11 +574,11 @@ function Scene.setParent(self: Scene, handle: number, parentHandle: number?)
 
     while ancestor ~= 0 do
       assert(ancestor ~= slot, 'scene: parenting would create a cycle')
-      ancestor = buffer.readi32(self._meta, ancestor * MetaStride + MetaParent)
+      ancestor = buffer.readi32(meta, ancestor * MetaStride + MetaParent)
     end
   end
 
-  local current = buffer.readi32(self._meta, slot * MetaStride + MetaParent)
+  local current = buffer.readi32(meta, slot * MetaStride + MetaParent)
   if current == parent then return end
 
   self:_unlink(slot)
@@ -585,10 +591,11 @@ end
 
 function Scene.parent(self: Scene, handle: number): number?
   local slot = self:_slot(handle)
-  local parent = buffer.readi32(self._meta, slot * MetaStride + MetaParent)
+  local meta = self._meta
+  local parent = buffer.readi32(meta, slot * MetaStride + MetaParent)
   if parent == 0 then return nil end
 
-  return self:_handle(parent)
+  return encode(parent, buffer.readu32(meta, parent * MetaStride + MetaGeneration))
 end
 
 function Scene.setTransform(
@@ -606,26 +613,28 @@ function Scene.setTransform(
   scaleZ: number
 )
   local slot = self:_slot(handle)
+  local transforms = self._local
   local localOffset = slot * LocalStride
-  buffer.writef32(self._local, localOffset + LocalPositionX, positionX)
-  buffer.writef32(self._local, localOffset + LocalPositionY, positionY)
-  buffer.writef32(self._local, localOffset + LocalPositionZ, positionZ)
-  buffer.writef32(self._local, localOffset + LocalRotationX, rotationX)
-  buffer.writef32(self._local, localOffset + LocalRotationY, rotationY)
-  buffer.writef32(self._local, localOffset + LocalRotationZ, rotationZ)
-  buffer.writef32(self._local, localOffset + LocalRotationW, rotationW)
-  buffer.writef32(self._local, localOffset + LocalScaleX, scaleX)
-  buffer.writef32(self._local, localOffset + LocalScaleY, scaleY)
-  buffer.writef32(self._local, localOffset + LocalScaleZ, scaleZ)
+  buffer.writef32(transforms, localOffset + LocalPositionX, positionX)
+  buffer.writef32(transforms, localOffset + LocalPositionY, positionY)
+  buffer.writef32(transforms, localOffset + LocalPositionZ, positionZ)
+  buffer.writef32(transforms, localOffset + LocalRotationX, rotationX)
+  buffer.writef32(transforms, localOffset + LocalRotationY, rotationY)
+  buffer.writef32(transforms, localOffset + LocalRotationZ, rotationZ)
+  buffer.writef32(transforms, localOffset + LocalRotationW, rotationW)
+  buffer.writef32(transforms, localOffset + LocalScaleX, scaleX)
+  buffer.writef32(transforms, localOffset + LocalScaleY, scaleY)
+  buffer.writef32(transforms, localOffset + LocalScaleZ, scaleZ)
   self:_markTransform(slot)
 end
 
 function Scene.setPosition(self: Scene, handle: number, positionX: number, positionY: number, positionZ: number)
   local slot = self:_slot(handle)
+  local transforms = self._local
   local localOffset = slot * LocalStride
-  buffer.writef32(self._local, localOffset + LocalPositionX, positionX)
-  buffer.writef32(self._local, localOffset + LocalPositionY, positionY)
-  buffer.writef32(self._local, localOffset + LocalPositionZ, positionZ)
+  buffer.writef32(transforms, localOffset + LocalPositionX, positionX)
+  buffer.writef32(transforms, localOffset + LocalPositionY, positionY)
+  buffer.writef32(transforms, localOffset + LocalPositionZ, positionZ)
   self:_markTransform(slot)
 end
 
@@ -638,20 +647,22 @@ function Scene.setRotation(
   rotationW: number
 )
   local slot = self:_slot(handle)
+  local transforms = self._local
   local localOffset = slot * LocalStride
-  buffer.writef32(self._local, localOffset + LocalRotationX, rotationX)
-  buffer.writef32(self._local, localOffset + LocalRotationY, rotationY)
-  buffer.writef32(self._local, localOffset + LocalRotationZ, rotationZ)
-  buffer.writef32(self._local, localOffset + LocalRotationW, rotationW)
+  buffer.writef32(transforms, localOffset + LocalRotationX, rotationX)
+  buffer.writef32(transforms, localOffset + LocalRotationY, rotationY)
+  buffer.writef32(transforms, localOffset + LocalRotationZ, rotationZ)
+  buffer.writef32(transforms, localOffset + LocalRotationW, rotationW)
   self:_markTransform(slot)
 end
 
 function Scene.setScale(self: Scene, handle: number, scaleX: number, scaleY: number, scaleZ: number)
   local slot = self:_slot(handle)
+  local transforms = self._local
   local localOffset = slot * LocalStride
-  buffer.writef32(self._local, localOffset + LocalScaleX, scaleX)
-  buffer.writef32(self._local, localOffset + LocalScaleY, scaleY)
-  buffer.writef32(self._local, localOffset + LocalScaleZ, scaleZ)
+  buffer.writef32(transforms, localOffset + LocalScaleX, scaleX)
+  buffer.writef32(transforms, localOffset + LocalScaleY, scaleY)
+  buffer.writef32(transforms, localOffset + LocalScaleZ, scaleZ)
   self:_markTransform(slot)
 end
 
@@ -667,28 +678,28 @@ function Scene.setBounds(
 )
   assert(minX <= maxX and minY <= maxY and minZ <= maxZ, 'scene: invalid bounds')
   local slot = self:_slot(handle)
+  local { _meta: meta, _localBounds: localBounds } = self
   local boundsOffset = slot * BoundsStride
-  buffer.writef32(self._localBounds, boundsOffset, minX)
-  buffer.writef32(self._localBounds, boundsOffset + 4, minY)
-  buffer.writef32(self._localBounds, boundsOffset + 8, minZ)
-  buffer.writef32(self._localBounds, boundsOffset + 12, maxX)
-  buffer.writef32(self._localBounds, boundsOffset + 16, maxY)
-  buffer.writef32(self._localBounds, boundsOffset + 20, maxZ)
+  buffer.writef32(localBounds, boundsOffset, minX)
+  buffer.writef32(localBounds, boundsOffset + 4, minY)
+  buffer.writef32(localBounds, boundsOffset + 8, minZ)
+  buffer.writef32(localBounds, boundsOffset + 12, maxX)
+  buffer.writef32(localBounds, boundsOffset + 16, maxY)
+  buffer.writef32(localBounds, boundsOffset + 20, maxZ)
   local metaOffset = slot * MetaStride
-  buffer.writeu32(
-    self._meta,
-    metaOffset + MetaFlags,
-    bit32.bor(buffer.readu32(self._meta, metaOffset + MetaFlags), OwnBounds)
-  )
+  buffer.writeu32(meta, metaOffset + MetaFlags, bit32.bor(buffer.readu32(meta, metaOffset + MetaFlags), OwnBounds))
   self:_markOwnBounds(slot)
 end
 
 function Scene.clearBounds(self: Scene, handle: number)
   local slot = self:_slot(handle)
+  local meta = self._meta
   local metaOffset = slot * MetaStride
-  local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
-  flags = bit32.band(flags, bit32.bnot(OwnBounds))
-  buffer.writeu32(self._meta, metaOffset + MetaFlags, flags)
+  buffer.writeu32(
+    meta,
+    metaOffset + MetaFlags,
+    bit32.band(buffer.readu32(meta, metaOffset + MetaFlags), bit32.bnot(OwnBounds))
+  )
   self:_markOwnBounds(slot)
 end
 
@@ -699,8 +710,9 @@ end
 
 function Scene.setEnabled(self: Scene, handle: number, enabled: boolean)
   local slot = self:_slot(handle)
+  local meta = self._meta
   local metaOffset = slot * MetaStride
-  local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
+  local flags = buffer.readu32(meta, metaOffset + MetaFlags)
 
   if enabled then
     flags = bit32.bor(flags, Enabled)
@@ -708,28 +720,26 @@ function Scene.setEnabled(self: Scene, handle: number, enabled: boolean)
     flags = bit32.band(flags, bit32.bnot(Enabled))
   end
 
-  buffer.writeu32(self._meta, metaOffset + MetaFlags, flags)
+  buffer.writeu32(meta, metaOffset + MetaFlags, flags)
 end
 
 function Scene.setRange(self: Scene, handle: number, minDistance: number, maxDistance: number)
   assert(minDistance >= 0 and maxDistance >= minDistance, 'scene: invalid LOD range')
   local slot = self:_slot(handle)
+  local ranges = self._range
   local rangeOffset = slot * RangeStride
-  buffer.writef32(self._range, rangeOffset, minDistance * minDistance)
-  buffer.writef32(
-    self._range,
-    rangeOffset + 4,
-    if maxDistance == math.huge then math.huge else maxDistance * maxDistance
-  )
+  buffer.writef32(ranges, rangeOffset, minDistance * minDistance)
+  buffer.writef32(ranges, rangeOffset + 4, if maxDistance == math.huge then math.huge else maxDistance * maxDistance)
 end
 
 function Scene.getWorldPosition(self: Scene, handle: number): (number, number, number)
   local slot = self:_slot(handle)
+  local world = self._world
   local worldOffset = slot * MatrixStride
 
-  return buffer.readf32(self._world, worldOffset + 12),
-    buffer.readf32(self._world, worldOffset + 28),
-    buffer.readf32(self._world, worldOffset + 44)
+  return buffer.readf32(world, worldOffset + 12),
+    buffer.readf32(world, worldOffset + 28),
+    buffer.readf32(world, worldOffset + 44)
 end
 
 function Scene.beginBatch(self: Scene)
