@@ -1,12 +1,13 @@
 --!strict
 -- dream.scene, timed from Luau: building scenes, updates after edits of every size, traversals,
 -- box queries, view collection and churn, on a flat world of cells and on a tree seven levels
--- deep. Run by `jess run --package . bench/bench.luau [filter] [results]` on a release build.
--- Prints one line per workload: its name, a tab, and the seconds one call takes, a call being
--- what the name says. Every workload's answer is checked against what 0.1.0 answers, before the
--- first batch and after the last, so a path that stopped doing the work, or does different work,
--- fails here instead of posting a time. With `results` as the second argument each workload's
--- answer is printed instead of timed, which is how the table of expectations is made.
+-- deep. Run by `jess run --package . bench/bench.luau [filter] [results]` on a release build;
+-- the filter is text a workload's name must hold, or several such, `|` between them. Prints one
+-- line per workload: its name, a tab, and the seconds one call takes, a call being what the name
+-- says. Every workload's answer is checked against what 0.1.0 answers, before the first batch and
+-- after the last, so a path that stopped doing the work, or does different work, fails here
+-- instead of posting a time. With `results` as the second argument each workload's answer is
+-- printed instead of timed, which is how the table of expectations is made.
 local scene = require '@dream/scene'
 
 -- A build without the verified toolchain runs Luau slower than a release does, so a number from
@@ -65,7 +66,7 @@ local function median(samples: { number }): number
 end
 
 local function wanted(name: string): boolean
-  return not only or string.find(name, only, 1, true) ~= nil
+  return not only or any[for part in string.split(only, '|') if string.find(name, part, 1, true) => true]
 end
 
 local function check(name: string, answer: string)
