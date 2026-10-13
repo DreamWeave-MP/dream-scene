@@ -29,6 +29,9 @@ local Enabled = 8
 local BoundsDirty = 16
 local OwnBoundsDirty = 32
 local AliveBoundsDirty = bit32.bor(Alive, BoundsDirty)
+local AliveTransformDirty = bit32.bor(Alive, TransformDirty)
+local NotBoundsDirty = bit32.bnot(BoundsDirty)
+local NotTransformOrOwnBoundsDirty = bit32.bnot(bit32.bor(TransformDirty, OwnBoundsDirty))
 
 -- Position xyz, rotation quaternion xyzw, scale xyz.
 local LocalStride = 40
@@ -303,84 +306,92 @@ function Scene._markOwnBounds(self: Scene, slot: number)
   self:_queueBounds(slot)
 end
 
-function Scene._updateOwnWorldBounds(self: Scene, slot: number)
+--- Places a node's own box in the world: the box the axes fit around its local box once its
+--- world matrix, as the buffer holds it, has turned and stretched it.
+local function placeOwnBounds(localBounds: buffer, world: buffer, ownWorldBounds: buffer, slot: number)
   local boundsOffset = slot * BoundsStride
-  local minX = buffer.readf32(self._localBounds, boundsOffset)
-  local minY = buffer.readf32(self._localBounds, boundsOffset + 4)
-  local minZ = buffer.readf32(self._localBounds, boundsOffset + 8)
-  local maxX = buffer.readf32(self._localBounds, boundsOffset + 12)
-  local maxY = buffer.readf32(self._localBounds, boundsOffset + 16)
-  local maxZ = buffer.readf32(self._localBounds, boundsOffset + 20)
+  local minX = buffer.readf32(localBounds, boundsOffset)
+  local minY = buffer.readf32(localBounds, boundsOffset + 4)
+  local minZ = buffer.readf32(localBounds, boundsOffset + 8)
+  local maxX = buffer.readf32(localBounds, boundsOffset + 12)
+  local maxY = buffer.readf32(localBounds, boundsOffset + 16)
+  local maxZ = buffer.readf32(localBounds, boundsOffset + 20)
   local centerX, centerY, centerZ = (minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5
   local extentX, extentY, extentZ = (maxX - minX) * 0.5, (maxY - minY) * 0.5, (maxZ - minZ) * 0.5
   local worldOffset = slot * MatrixStride
-  local world00 = buffer.readf32(self._world, worldOffset)
-  local world01 = buffer.readf32(self._world, worldOffset + 4)
-  local world02 = buffer.readf32(self._world, worldOffset + 8)
-  local worldX = buffer.readf32(self._world, worldOffset + 12)
-  local world10 = buffer.readf32(self._world, worldOffset + 16)
-  local world11 = buffer.readf32(self._world, worldOffset + 20)
-  local world12 = buffer.readf32(self._world, worldOffset + 24)
-  local worldY = buffer.readf32(self._world, worldOffset + 28)
-  local world20 = buffer.readf32(self._world, worldOffset + 32)
-  local world21 = buffer.readf32(self._world, worldOffset + 36)
-  local world22 = buffer.readf32(self._world, worldOffset + 40)
-  local worldZ = buffer.readf32(self._world, worldOffset + 44)
+  local world00 = buffer.readf32(world, worldOffset)
+  local world01 = buffer.readf32(world, worldOffset + 4)
+  local world02 = buffer.readf32(world, worldOffset + 8)
+  local worldX = buffer.readf32(world, worldOffset + 12)
+  local world10 = buffer.readf32(world, worldOffset + 16)
+  local world11 = buffer.readf32(world, worldOffset + 20)
+  local world12 = buffer.readf32(world, worldOffset + 24)
+  local worldY = buffer.readf32(world, worldOffset + 28)
+  local world20 = buffer.readf32(world, worldOffset + 32)
+  local world21 = buffer.readf32(world, worldOffset + 36)
+  local world22 = buffer.readf32(world, worldOffset + 40)
+  local worldZ = buffer.readf32(world, worldOffset + 44)
   local worldCenterX = world00 * centerX + world01 * centerY + world02 * centerZ + worldX
   local worldCenterY = world10 * centerX + world11 * centerY + world12 * centerZ + worldY
   local worldCenterZ = world20 * centerX + world21 * centerY + world22 * centerZ + worldZ
   local worldExtentX = math.abs(world00) * extentX + math.abs(world01) * extentY + math.abs(world02) * extentZ
   local worldExtentY = math.abs(world10) * extentX + math.abs(world11) * extentY + math.abs(world12) * extentZ
   local worldExtentZ = math.abs(world20) * extentX + math.abs(world21) * extentY + math.abs(world22) * extentZ
-  buffer.writef32(self._ownWorldBounds, boundsOffset, worldCenterX - worldExtentX)
-  buffer.writef32(self._ownWorldBounds, boundsOffset + 4, worldCenterY - worldExtentY)
-  buffer.writef32(self._ownWorldBounds, boundsOffset + 8, worldCenterZ - worldExtentZ)
-  buffer.writef32(self._ownWorldBounds, boundsOffset + 12, worldCenterX + worldExtentX)
-  buffer.writef32(self._ownWorldBounds, boundsOffset + 16, worldCenterY + worldExtentY)
-  buffer.writef32(self._ownWorldBounds, boundsOffset + 20, worldCenterZ + worldExtentZ)
+  buffer.writef32(ownWorldBounds, boundsOffset, worldCenterX - worldExtentX)
+  buffer.writef32(ownWorldBounds, boundsOffset + 4, worldCenterY - worldExtentY)
+  buffer.writef32(ownWorldBounds, boundsOffset + 8, worldCenterZ - worldExtentZ)
+  buffer.writef32(ownWorldBounds, boundsOffset + 12, worldCenterX + worldExtentX)
+  buffer.writef32(ownWorldBounds, boundsOffset + 16, worldCenterY + worldExtentY)
+  buffer.writef32(ownWorldBounds, boundsOffset + 20, worldCenterZ + worldExtentZ)
 end
 
-function Scene._recomputeSubtreeBounds(self: Scene, slot: number)
-  local metaOffset = slot * MetaStride
-  local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
+--- Folds a node's own box, when `flags` say it has one, and its children's subtree boxes into
+--- its subtree box.
+local function foldSubtreeBounds(
+  meta: buffer,
+  ownWorldBounds: buffer,
+  subtreeBounds: buffer,
+  slot: number,
+  flags: number
+)
   local boundsOffset = slot * BoundsStride
   local minX, minY, minZ = math.huge, math.huge, math.huge
   local maxX, maxY, maxZ = -math.huge, -math.huge, -math.huge
 
   if bit32.band(flags, OwnBounds) ~= 0 then
-    minX = buffer.readf32(self._ownWorldBounds, boundsOffset)
-    minY = buffer.readf32(self._ownWorldBounds, boundsOffset + 4)
-    minZ = buffer.readf32(self._ownWorldBounds, boundsOffset + 8)
-    maxX = buffer.readf32(self._ownWorldBounds, boundsOffset + 12)
-    maxY = buffer.readf32(self._ownWorldBounds, boundsOffset + 16)
-    maxZ = buffer.readf32(self._ownWorldBounds, boundsOffset + 20)
+    minX = buffer.readf32(ownWorldBounds, boundsOffset)
+    minY = buffer.readf32(ownWorldBounds, boundsOffset + 4)
+    minZ = buffer.readf32(ownWorldBounds, boundsOffset + 8)
+    maxX = buffer.readf32(ownWorldBounds, boundsOffset + 12)
+    maxY = buffer.readf32(ownWorldBounds, boundsOffset + 16)
+    maxZ = buffer.readf32(ownWorldBounds, boundsOffset + 20)
   end
 
-  local child = buffer.readi32(self._meta, metaOffset + MetaFirstChild)
+  local child = buffer.readi32(meta, slot * MetaStride + MetaFirstChild)
 
   while child ~= 0 do
     local childOffset = child * BoundsStride
-    local childMinX = buffer.readf32(self._subtreeBounds, childOffset)
-    local childMinY = buffer.readf32(self._subtreeBounds, childOffset + 4)
-    local childMinZ = buffer.readf32(self._subtreeBounds, childOffset + 8)
-    local childMaxX = buffer.readf32(self._subtreeBounds, childOffset + 12)
-    local childMaxY = buffer.readf32(self._subtreeBounds, childOffset + 16)
-    local childMaxZ = buffer.readf32(self._subtreeBounds, childOffset + 20)
+    local childMinX = buffer.readf32(subtreeBounds, childOffset)
+    local childMinY = buffer.readf32(subtreeBounds, childOffset + 4)
+    local childMinZ = buffer.readf32(subtreeBounds, childOffset + 8)
+    local childMaxX = buffer.readf32(subtreeBounds, childOffset + 12)
+    local childMaxY = buffer.readf32(subtreeBounds, childOffset + 16)
+    local childMaxZ = buffer.readf32(subtreeBounds, childOffset + 20)
 
     if childMinX <= childMaxX then
       minX, minY, minZ = math.min(minX, childMinX), math.min(minY, childMinY), math.min(minZ, childMinZ)
       maxX, maxY, maxZ = math.max(maxX, childMaxX), math.max(maxY, childMaxY), math.max(maxZ, childMaxZ)
     end
 
-    child = buffer.readi32(self._meta, child * MetaStride + MetaNext)
+    child = buffer.readi32(meta, child * MetaStride + MetaNext)
   end
 
-  buffer.writef32(self._subtreeBounds, boundsOffset, minX)
-  buffer.writef32(self._subtreeBounds, boundsOffset + 4, minY)
-  buffer.writef32(self._subtreeBounds, boundsOffset + 8, minZ)
-  buffer.writef32(self._subtreeBounds, boundsOffset + 12, maxX)
-  buffer.writef32(self._subtreeBounds, boundsOffset + 16, maxY)
-  buffer.writef32(self._subtreeBounds, boundsOffset + 20, maxZ)
+  buffer.writef32(subtreeBounds, boundsOffset, minX)
+  buffer.writef32(subtreeBounds, boundsOffset + 4, minY)
+  buffer.writef32(subtreeBounds, boundsOffset + 8, minZ)
+  buffer.writef32(subtreeBounds, boundsOffset + 12, maxX)
+  buffer.writef32(subtreeBounds, boundsOffset + 16, maxY)
+  buffer.writef32(subtreeBounds, boundsOffset + 20, maxZ)
 end
 
 function Scene._unlink(self: Scene, slot: number)
@@ -498,13 +509,12 @@ end
 
 function Scene.destroy(self: Scene, handle: number): number
   local root = self:_slot(handle)
-  local oldParent = buffer.readi32(self._meta, root * MetaStride + MetaParent)
+  local { _meta: meta, _stack: stack, _order: order } = self
+  local oldParent = buffer.readi32(meta, root * MetaStride + MetaParent)
   self:_unlink(root)
 
   if oldParent ~= 0 then self:_queueBounds(oldParent) end
 
-  local stack = self._stack
-  local order = self._order
   local top = 1
   stack[1] = root
   local count = 0
@@ -514,31 +524,34 @@ function Scene.destroy(self: Scene, handle: number): number
     top -= 1
     count += 1
     order[count] = slot
-    local child = buffer.readi32(self._meta, slot * MetaStride + MetaFirstChild)
+    local child = buffer.readi32(meta, slot * MetaStride + MetaFirstChild)
 
     while child ~= 0 do
       top += 1
       stack[top] = child
-      child = buffer.readi32(self._meta, child * MetaStride + MetaNext)
+      child = buffer.readi32(meta, child * MetaStride + MetaNext)
     end
   end
+
+  local free = self._free
 
   for index = 1, count do
     local slot = order[index]
     local metaOffset = slot * MetaStride
-    local generation = buffer.readu32(self._meta, metaOffset + MetaGeneration) + 1
+    local generation = buffer.readu32(meta, metaOffset + MetaGeneration) + 1
 
     if generation >= 0x1fffffff then generation = 1 end
 
-    buffer.writeu32(self._meta, metaOffset + MetaGeneration, generation)
-    buffer.writeu32(self._meta, metaOffset + MetaFlags, 0)
-    buffer.writei32(self._meta, metaOffset + MetaParent, 0)
-    buffer.writei32(self._meta, metaOffset + MetaFirstChild, 0)
-    buffer.writei32(self._meta, metaOffset + MetaPrevious, 0)
-    buffer.writei32(self._meta, metaOffset + MetaNext, self._free)
-    self._free = slot
+    buffer.writeu32(meta, metaOffset + MetaGeneration, generation)
+    buffer.writeu32(meta, metaOffset + MetaFlags, 0)
+    buffer.writei32(meta, metaOffset + MetaParent, 0)
+    buffer.writei32(meta, metaOffset + MetaFirstChild, 0)
+    buffer.writei32(meta, metaOffset + MetaPrevious, 0)
+    buffer.writei32(meta, metaOffset + MetaNext, free)
+    free = slot
   end
 
+  self._free = free
   self._count -= count
 
   return count
@@ -730,16 +743,25 @@ end
 
 function Scene.update(self: Scene): UpdateCounts
   assert(self._batchDepth == 0, 'scene: update during batch')
-  local dirtyTransforms = self._dirtyTransforms
-  local dirtyBounds = self._dirtyBounds
   local dirtyTransformCount, dirtyBoundsCount = self._dirtyTransformCount, self._dirtyBoundsCount
 
   if not self._fullDirty and dirtyTransformCount == 0 and dirtyBoundsCount == 0 then
     return { nodesVisited = 0, transformsUpdated = 0, boundedNodes = 0, boundsUpdated = 0 }
   end
 
-  local stack = self._stack
-  local order = self._order
+  local {
+    _meta: meta,
+    _local: transforms,
+    _world: world,
+    _localBounds: localBounds,
+    _ownWorldBounds: ownWorldBounds,
+    _subtreeBounds: subtreeBounds,
+    _stack: stack,
+    _order: order,
+    _dirtyTransforms: dirtyTransforms,
+    _dirtyBounds: dirtyBounds,
+  } = self
+
   local top = 0
 
   if self._fullDirty then
@@ -748,31 +770,29 @@ function Scene.update(self: Scene): UpdateCounts
     while root ~= 0 do
       top += 1
       stack[top] = root
-      root = buffer.readi32(self._meta, root * MetaStride + MetaNext)
+      root = buffer.readi32(meta, root * MetaStride + MetaNext)
     end
   else
     -- Collapse direct transform dirties to the highest dirty roots before clearing any flags.
     for index = 1, dirtyTransformCount do
       local slot = dirtyTransforms[index]
       local metaOffset = slot * MetaStride
-      local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
+      local flags = buffer.readu32(meta, metaOffset + MetaFlags)
 
-      if bit32.band(flags, bit32.bor(Alive, TransformDirty)) ~= bit32.bor(Alive, TransformDirty) then
-        continue
-      end
+      if bit32.band(flags, AliveTransformDirty) ~= AliveTransformDirty then continue end
 
-      local parent = buffer.readi32(self._meta, metaOffset + MetaParent)
+      local parent = buffer.readi32(meta, metaOffset + MetaParent)
       local covered = false
 
       while parent ~= 0 do
-        local parentFlags = buffer.readu32(self._meta, parent * MetaStride + MetaFlags)
+        local parentFlags = buffer.readu32(meta, parent * MetaStride + MetaFlags)
 
         if bit32.band(parentFlags, TransformDirty) ~= 0 then
           covered = true
           break
         end
 
-        parent = buffer.readi32(self._meta, parent * MetaStride + MetaParent)
+        parent = buffer.readi32(meta, parent * MetaStride + MetaParent)
       end
 
       if not covered then
@@ -790,28 +810,28 @@ function Scene.update(self: Scene): UpdateCounts
     local slot = stack[top]
     top -= 1
     local metaOffset = slot * MetaStride
-    local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
+    local flags = buffer.readu32(meta, metaOffset + MetaFlags)
     visited += 1
     order[visited] = slot
 
-    local parent = buffer.readi32(self._meta, metaOffset + MetaParent)
+    local parent = buffer.readi32(meta, metaOffset + MetaParent)
     local depth = 0
 
-    if parent ~= 0 then depth = buffer.readu32(self._meta, parent * MetaStride + MetaDepth) + 1 end
+    if parent ~= 0 then depth = buffer.readu32(meta, parent * MetaStride + MetaDepth) + 1 end
 
-    buffer.writeu32(self._meta, metaOffset + MetaDepth, depth)
+    buffer.writeu32(meta, metaOffset + MetaDepth, depth)
 
     local localOffset = slot * LocalStride
-    local positionX = buffer.readf32(self._local, localOffset + LocalPositionX)
-    local positionY = buffer.readf32(self._local, localOffset + LocalPositionY)
-    local positionZ = buffer.readf32(self._local, localOffset + LocalPositionZ)
-    local rotationX = buffer.readf32(self._local, localOffset + LocalRotationX)
-    local rotationY = buffer.readf32(self._local, localOffset + LocalRotationY)
-    local rotationZ = buffer.readf32(self._local, localOffset + LocalRotationZ)
-    local rotationW = buffer.readf32(self._local, localOffset + LocalRotationW)
-    local scaleX = buffer.readf32(self._local, localOffset + LocalScaleX)
-    local scaleY = buffer.readf32(self._local, localOffset + LocalScaleY)
-    local scaleZ = buffer.readf32(self._local, localOffset + LocalScaleZ)
+    local positionX = buffer.readf32(transforms, localOffset + LocalPositionX)
+    local positionY = buffer.readf32(transforms, localOffset + LocalPositionY)
+    local positionZ = buffer.readf32(transforms, localOffset + LocalPositionZ)
+    local rotationX = buffer.readf32(transforms, localOffset + LocalRotationX)
+    local rotationY = buffer.readf32(transforms, localOffset + LocalRotationY)
+    local rotationZ = buffer.readf32(transforms, localOffset + LocalRotationZ)
+    local rotationW = buffer.readf32(transforms, localOffset + LocalRotationW)
+    local scaleX = buffer.readf32(transforms, localOffset + LocalScaleX)
+    local scaleY = buffer.readf32(transforms, localOffset + LocalScaleY)
+    local scaleZ = buffer.readf32(transforms, localOffset + LocalScaleZ)
     local xx, yy, zz = rotationX * rotationX, rotationY * rotationY, rotationZ * rotationZ
     local xy, xz, yz = rotationX * rotationY, rotationX * rotationZ, rotationY * rotationZ
     local xw, yw, zw = rotationX * rotationW, rotationY * rotationW, rotationZ * rotationW
@@ -827,86 +847,84 @@ function Scene.update(self: Scene): UpdateCounts
     local worldOffset = slot * MatrixStride
 
     if parent == 0 then
-      buffer.writef32(self._world, worldOffset, local00)
-      buffer.writef32(self._world, worldOffset + 4, local01)
-      buffer.writef32(self._world, worldOffset + 8, local02)
-      buffer.writef32(self._world, worldOffset + 12, positionX)
-      buffer.writef32(self._world, worldOffset + 16, local10)
-      buffer.writef32(self._world, worldOffset + 20, local11)
-      buffer.writef32(self._world, worldOffset + 24, local12)
-      buffer.writef32(self._world, worldOffset + 28, positionY)
-      buffer.writef32(self._world, worldOffset + 32, local20)
-      buffer.writef32(self._world, worldOffset + 36, local21)
-      buffer.writef32(self._world, worldOffset + 40, local22)
-      buffer.writef32(self._world, worldOffset + 44, positionZ)
+      buffer.writef32(world, worldOffset, local00)
+      buffer.writef32(world, worldOffset + 4, local01)
+      buffer.writef32(world, worldOffset + 8, local02)
+      buffer.writef32(world, worldOffset + 12, positionX)
+      buffer.writef32(world, worldOffset + 16, local10)
+      buffer.writef32(world, worldOffset + 20, local11)
+      buffer.writef32(world, worldOffset + 24, local12)
+      buffer.writef32(world, worldOffset + 28, positionY)
+      buffer.writef32(world, worldOffset + 32, local20)
+      buffer.writef32(world, worldOffset + 36, local21)
+      buffer.writef32(world, worldOffset + 40, local22)
+      buffer.writef32(world, worldOffset + 44, positionZ)
     else
       local parentOffset = parent * MatrixStride
-      local parent00 = buffer.readf32(self._world, parentOffset)
-      local parent01 = buffer.readf32(self._world, parentOffset + 4)
-      local parent02 = buffer.readf32(self._world, parentOffset + 8)
-      local parentX = buffer.readf32(self._world, parentOffset + 12)
-      local parent10 = buffer.readf32(self._world, parentOffset + 16)
-      local parent11 = buffer.readf32(self._world, parentOffset + 20)
-      local parent12 = buffer.readf32(self._world, parentOffset + 24)
-      local parentY = buffer.readf32(self._world, parentOffset + 28)
-      local parent20 = buffer.readf32(self._world, parentOffset + 32)
-      local parent21 = buffer.readf32(self._world, parentOffset + 36)
-      local parent22 = buffer.readf32(self._world, parentOffset + 40)
-      local parentZ = buffer.readf32(self._world, parentOffset + 44)
-      buffer.writef32(self._world, worldOffset, parent00 * local00 + parent01 * local10 + parent02 * local20)
-      buffer.writef32(self._world, worldOffset + 4, parent00 * local01 + parent01 * local11 + parent02 * local21)
-      buffer.writef32(self._world, worldOffset + 8, parent00 * local02 + parent01 * local12 + parent02 * local22)
+      local parent00 = buffer.readf32(world, parentOffset)
+      local parent01 = buffer.readf32(world, parentOffset + 4)
+      local parent02 = buffer.readf32(world, parentOffset + 8)
+      local parentX = buffer.readf32(world, parentOffset + 12)
+      local parent10 = buffer.readf32(world, parentOffset + 16)
+      local parent11 = buffer.readf32(world, parentOffset + 20)
+      local parent12 = buffer.readf32(world, parentOffset + 24)
+      local parentY = buffer.readf32(world, parentOffset + 28)
+      local parent20 = buffer.readf32(world, parentOffset + 32)
+      local parent21 = buffer.readf32(world, parentOffset + 36)
+      local parent22 = buffer.readf32(world, parentOffset + 40)
+      local parentZ = buffer.readf32(world, parentOffset + 44)
+      buffer.writef32(world, worldOffset, parent00 * local00 + parent01 * local10 + parent02 * local20)
+      buffer.writef32(world, worldOffset + 4, parent00 * local01 + parent01 * local11 + parent02 * local21)
+      buffer.writef32(world, worldOffset + 8, parent00 * local02 + parent01 * local12 + parent02 * local22)
       buffer.writef32(
-        self._world,
+        world,
         worldOffset + 12,
         parent00 * positionX + parent01 * positionY + parent02 * positionZ + parentX
       )
-      buffer.writef32(self._world, worldOffset + 16, parent10 * local00 + parent11 * local10 + parent12 * local20)
-      buffer.writef32(self._world, worldOffset + 20, parent10 * local01 + parent11 * local11 + parent12 * local21)
-      buffer.writef32(self._world, worldOffset + 24, parent10 * local02 + parent11 * local12 + parent12 * local22)
+      buffer.writef32(world, worldOffset + 16, parent10 * local00 + parent11 * local10 + parent12 * local20)
+      buffer.writef32(world, worldOffset + 20, parent10 * local01 + parent11 * local11 + parent12 * local21)
+      buffer.writef32(world, worldOffset + 24, parent10 * local02 + parent11 * local12 + parent12 * local22)
       buffer.writef32(
-        self._world,
+        world,
         worldOffset + 28,
         parent10 * positionX + parent11 * positionY + parent12 * positionZ + parentY
       )
-      buffer.writef32(self._world, worldOffset + 32, parent20 * local00 + parent21 * local10 + parent22 * local20)
-      buffer.writef32(self._world, worldOffset + 36, parent20 * local01 + parent21 * local11 + parent22 * local21)
-      buffer.writef32(self._world, worldOffset + 40, parent20 * local02 + parent21 * local12 + parent22 * local22)
+      buffer.writef32(world, worldOffset + 32, parent20 * local00 + parent21 * local10 + parent22 * local20)
+      buffer.writef32(world, worldOffset + 36, parent20 * local01 + parent21 * local11 + parent22 * local21)
+      buffer.writef32(world, worldOffset + 40, parent20 * local02 + parent21 * local12 + parent22 * local22)
       buffer.writef32(
-        self._world,
+        world,
         worldOffset + 44,
         parent20 * positionX + parent21 * positionY + parent22 * positionZ + parentZ
       )
     end
 
     if bit32.band(flags, OwnBounds) ~= 0 then
-      self:_updateOwnWorldBounds(slot)
+      placeOwnBounds(localBounds, world, ownWorldBounds, slot)
       boundedNodes += 1
     end
 
-    flags = bit32.band(flags, bit32.bnot(bit32.bor(TransformDirty, OwnBoundsDirty)))
-    buffer.writeu32(self._meta, metaOffset + MetaFlags, flags)
+    buffer.writeu32(meta, metaOffset + MetaFlags, bit32.band(flags, NotTransformOrOwnBoundsDirty))
 
-    local child = buffer.readi32(self._meta, metaOffset + MetaFirstChild)
+    local child = buffer.readi32(meta, metaOffset + MetaFirstChild)
 
     while child ~= 0 do
       top += 1
       stack[top] = child
-      child = buffer.readi32(self._meta, child * MetaStride + MetaNext)
+      child = buffer.readi32(meta, child * MetaStride + MetaNext)
     end
   end
 
   -- Dirty transform subtrees are complete; fold their bounds bottom-up.
-  local boundsUpdated = 0
-
   for index = visited, 1, -1 do
     local slot = order[index]
-    self:_recomputeSubtreeBounds(slot)
-    boundsUpdated += 1
     local metaOffset = slot * MetaStride
-    local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
-    buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.band(flags, bit32.bnot(BoundsDirty)))
+    local flags = buffer.readu32(meta, metaOffset + MetaFlags)
+    foldSubtreeBounds(meta, ownWorldBounds, subtreeBounds, slot, flags)
+    buffer.writeu32(meta, metaOffset + MetaFlags, bit32.band(flags, NotBoundsDirty))
   end
+
+  local boundsUpdated = visited
 
   -- What remains are ancestors of changed subtrees or bounds-only edits. Deepest first folds
   -- every child before its parent, and nodes of one depth read nothing of each other, so depth
@@ -923,7 +941,7 @@ function Scene.update(self: Scene): UpdateCounts
     self._depthOrder = buffer.create(bytes)
   end
 
-  local meta, depthOrder = self._meta, self._depthOrder
+  local depthOrder = self._depthOrder
   local remaining, remainingCount = into(self._remaining, 'u32')[
     for slot in dirtyBounds[1:dirtyBoundsCount]
     if bit32.band(buffer.readu32(meta, slot * MetaStride + MetaFlags), AliveBoundsDirty) == AliveBoundsDirty
@@ -940,21 +958,19 @@ function Scene.update(self: Scene): UpdateCounts
   for index = remainingCount - 1, 0, -1 do
     local slot = buffer.readu32(remaining, buffer.readu32(depthOrder, index * 4) * 4)
     local metaOffset = slot * MetaStride
-    local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
+    local flags = buffer.readu32(meta, metaOffset + MetaFlags)
 
     if bit32.band(flags, OwnBoundsDirty) ~= 0 then
       if bit32.band(flags, OwnBounds) ~= 0 then
-        self:_updateOwnWorldBounds(slot)
+        placeOwnBounds(localBounds, world, ownWorldBounds, slot)
         boundedNodes += 1
       end
 
       flags = bit32.band(flags, bit32.bnot(OwnBoundsDirty))
     end
 
-    self:_recomputeSubtreeBounds(slot)
-    boundsUpdated += 1
-    flags = bit32.band(flags, bit32.bnot(BoundsDirty))
-    buffer.writeu32(self._meta, metaOffset + MetaFlags, flags)
+    foldSubtreeBounds(meta, ownWorldBounds, subtreeBounds, slot, flags)
+    buffer.writeu32(meta, metaOffset + MetaFlags, bit32.band(flags, NotBoundsDirty))
   end
 
   self._dirtyTransformCount = 0
@@ -966,7 +982,7 @@ function Scene.update(self: Scene): UpdateCounts
     nodesVisited = visited,
     transformsUpdated = visited,
     boundedNodes = boundedNodes,
-    boundsUpdated = boundsUpdated,
+    boundsUpdated = boundsUpdated + remainingCount,
   }
 end
 
@@ -974,14 +990,14 @@ function Scene.collect(self: Scene, mask: number?, out: { number }?): { number }
   local traversalMask = mask or 0xffffffff
   local result = out or {}
   table.clear(result)
-  local stack = self._stack
+  local { _meta: meta, _stack: stack } = self
   local top = 0
   local root = self._firstRoot
 
   while root ~= 0 do
     top += 1
     stack[top] = root
-    root = buffer.readi32(self._meta, root * MetaStride + MetaNext)
+    root = buffer.readi32(meta, root * MetaStride + MetaNext)
   end
 
   local count = 0
@@ -990,23 +1006,22 @@ function Scene.collect(self: Scene, mask: number?, out: { number }?): { number }
     local slot = stack[top]
     top -= 1
     local metaOffset = slot * MetaStride
-    local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
 
     if
-      bit32.band(flags, Enabled) == 0
-      or bit32.band(buffer.readu32(self._meta, metaOffset + MetaMask), traversalMask) == 0
+      bit32.band(buffer.readu32(meta, metaOffset + MetaFlags), Enabled) == 0
+      or bit32.band(buffer.readu32(meta, metaOffset + MetaMask), traversalMask) == 0
     then
       continue
     end
 
     count += 1
-    result[count] = self:_handle(slot)
-    local child = buffer.readi32(self._meta, metaOffset + MetaFirstChild)
+    result[count] = encode(slot, buffer.readu32(meta, metaOffset + MetaGeneration))
+    local child = buffer.readi32(meta, metaOffset + MetaFirstChild)
 
     while child ~= 0 do
       top += 1
       stack[top] = child
-      child = buffer.readi32(self._meta, child * MetaStride + MetaNext)
+      child = buffer.readi32(meta, child * MetaStride + MetaNext)
     end
   end
 
@@ -1027,14 +1042,14 @@ function Scene.queryAabb(
   local traversalMask = mask or 0xffffffff
   local result = out or {}
   table.clear(result)
-  local stack = self._stack
+  local { _meta: meta, _subtreeBounds: subtreeBounds, _ownWorldBounds: ownWorldBounds, _stack: stack } = self
   local top = 0
   local root = self._firstRoot
 
   while root ~= 0 do
     top += 1
     stack[top] = root
-    root = buffer.readi32(self._meta, root * MetaStride + MetaNext)
+    root = buffer.readi32(meta, root * MetaStride + MetaNext)
   end
 
   local count = 0
@@ -1043,22 +1058,22 @@ function Scene.queryAabb(
     local slot = stack[top]
     top -= 1
     local metaOffset = slot * MetaStride
-    local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
+    local flags = buffer.readu32(meta, metaOffset + MetaFlags)
 
     if
       bit32.band(flags, Enabled) == 0
-      or bit32.band(buffer.readu32(self._meta, metaOffset + MetaMask), traversalMask) == 0
+      or bit32.band(buffer.readu32(meta, metaOffset + MetaMask), traversalMask) == 0
     then
       continue
     end
 
     local boundsOffset = slot * BoundsStride
-    local subtreeMinX = buffer.readf32(self._subtreeBounds, boundsOffset)
-    local subtreeMinY = buffer.readf32(self._subtreeBounds, boundsOffset + 4)
-    local subtreeMinZ = buffer.readf32(self._subtreeBounds, boundsOffset + 8)
-    local subtreeMaxX = buffer.readf32(self._subtreeBounds, boundsOffset + 12)
-    local subtreeMaxY = buffer.readf32(self._subtreeBounds, boundsOffset + 16)
-    local subtreeMaxZ = buffer.readf32(self._subtreeBounds, boundsOffset + 20)
+    local subtreeMinX = buffer.readf32(subtreeBounds, boundsOffset)
+    local subtreeMinY = buffer.readf32(subtreeBounds, boundsOffset + 4)
+    local subtreeMinZ = buffer.readf32(subtreeBounds, boundsOffset + 8)
+    local subtreeMaxX = buffer.readf32(subtreeBounds, boundsOffset + 12)
+    local subtreeMaxY = buffer.readf32(subtreeBounds, boundsOffset + 16)
+    local subtreeMaxZ = buffer.readf32(subtreeBounds, boundsOffset + 20)
 
     if
       not (
@@ -1083,25 +1098,25 @@ function Scene.queryAabb(
     end
 
     if bit32.band(flags, OwnBounds) ~= 0 then
-      local ownMinX = buffer.readf32(self._ownWorldBounds, boundsOffset)
-      local ownMinY = buffer.readf32(self._ownWorldBounds, boundsOffset + 4)
-      local ownMinZ = buffer.readf32(self._ownWorldBounds, boundsOffset + 8)
-      local ownMaxX = buffer.readf32(self._ownWorldBounds, boundsOffset + 12)
-      local ownMaxY = buffer.readf32(self._ownWorldBounds, boundsOffset + 16)
-      local ownMaxZ = buffer.readf32(self._ownWorldBounds, boundsOffset + 20)
+      local ownMinX = buffer.readf32(ownWorldBounds, boundsOffset)
+      local ownMinY = buffer.readf32(ownWorldBounds, boundsOffset + 4)
+      local ownMinZ = buffer.readf32(ownWorldBounds, boundsOffset + 8)
+      local ownMaxX = buffer.readf32(ownWorldBounds, boundsOffset + 12)
+      local ownMaxY = buffer.readf32(ownWorldBounds, boundsOffset + 16)
+      local ownMaxZ = buffer.readf32(ownWorldBounds, boundsOffset + 20)
 
       if overlapsAabb(minX, minY, minZ, maxX, maxY, maxZ, ownMinX, ownMinY, ownMinZ, ownMaxX, ownMaxY, ownMaxZ) then
         count += 1
-        result[count] = self:_handle(slot)
+        result[count] = encode(slot, buffer.readu32(meta, metaOffset + MetaGeneration))
       end
     end
 
-    local child = buffer.readi32(self._meta, metaOffset + MetaFirstChild)
+    local child = buffer.readi32(meta, metaOffset + MetaFirstChild)
 
     while child ~= 0 do
       top += 1
       stack[top] = child
-      child = buffer.readi32(self._meta, child * MetaStride + MetaNext)
+      child = buffer.readi32(meta, child * MetaStride + MetaNext)
     end
   end
 
@@ -1119,14 +1134,14 @@ function Scene.collectForView(
   local traversalMask = mask or 0xffffffff
   local result = out or {}
   table.clear(result)
-  local stack = self._stack
+  local { _meta: meta, _world: world, _subtreeBounds: subtreeBounds, _range: ranges, _stack: stack } = self
   local top = 0
   local root = self._firstRoot
 
   while root ~= 0 do
     top += 1
     stack[top] = root
-    root = buffer.readi32(self._meta, root * MetaStride + MetaNext)
+    root = buffer.readi32(meta, root * MetaStride + MetaNext)
   end
 
   local count = 0
@@ -1135,31 +1150,30 @@ function Scene.collectForView(
     local slot = stack[top]
     top -= 1
     local metaOffset = slot * MetaStride
-    local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
 
     if
-      bit32.band(flags, Enabled) == 0
-      or bit32.band(buffer.readu32(self._meta, metaOffset + MetaMask), traversalMask) == 0
+      bit32.band(buffer.readu32(meta, metaOffset + MetaFlags), Enabled) == 0
+      or bit32.band(buffer.readu32(meta, metaOffset + MetaMask), traversalMask) == 0
     then
       continue
     end
 
     local boundsOffset = slot * BoundsStride
-    local minX = buffer.readf32(self._subtreeBounds, boundsOffset)
-    local minY = buffer.readf32(self._subtreeBounds, boundsOffset + 4)
-    local minZ = buffer.readf32(self._subtreeBounds, boundsOffset + 8)
-    local maxX = buffer.readf32(self._subtreeBounds, boundsOffset + 12)
-    local maxY = buffer.readf32(self._subtreeBounds, boundsOffset + 16)
-    local maxZ = buffer.readf32(self._subtreeBounds, boundsOffset + 20)
+    local minX = buffer.readf32(subtreeBounds, boundsOffset)
+    local minY = buffer.readf32(subtreeBounds, boundsOffset + 4)
+    local minZ = buffer.readf32(subtreeBounds, boundsOffset + 8)
+    local maxX = buffer.readf32(subtreeBounds, boundsOffset + 12)
+    local maxY = buffer.readf32(subtreeBounds, boundsOffset + 16)
+    local maxZ = buffer.readf32(subtreeBounds, boundsOffset + 20)
     local distanceSquared
 
     if minX <= maxX then
       distanceSquared = pointAabbDistanceSquared(viewX, viewY, viewZ, minX, minY, minZ, maxX, maxY, maxZ)
     else
       local worldOffset = slot * MatrixStride
-      local deltaX = buffer.readf32(self._world, worldOffset + 12) - viewX
-      local deltaY = buffer.readf32(self._world, worldOffset + 28) - viewY
-      local deltaZ = buffer.readf32(self._world, worldOffset + 44) - viewZ
+      local deltaX = buffer.readf32(world, worldOffset + 12) - viewX
+      local deltaY = buffer.readf32(world, worldOffset + 28) - viewY
+      local deltaZ = buffer.readf32(world, worldOffset + 44) - viewZ
       distanceSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
     end
 
@@ -1168,21 +1182,21 @@ function Scene.collectForView(
     -- Written as the range it must be inside: a distance that is not a number is inside none.
     if
       not (
-        distanceSquared >= buffer.readf32(self._range, rangeOffset)
-        and distanceSquared < buffer.readf32(self._range, rangeOffset + 4)
+        distanceSquared >= buffer.readf32(ranges, rangeOffset)
+        and distanceSquared < buffer.readf32(ranges, rangeOffset + 4)
       )
     then
       continue
     end
 
     count += 1
-    result[count] = self:_handle(slot)
-    local child = buffer.readi32(self._meta, metaOffset + MetaFirstChild)
+    result[count] = encode(slot, buffer.readu32(meta, metaOffset + MetaGeneration))
+    local child = buffer.readi32(meta, metaOffset + MetaFirstChild)
 
     while child ~= 0 do
       top += 1
       stack[top] = child
-      child = buffer.readi32(self._meta, child * MetaStride + MetaNext)
+      child = buffer.readi32(meta, child * MetaStride + MetaNext)
     end
   end
 
