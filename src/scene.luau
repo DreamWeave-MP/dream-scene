@@ -73,8 +73,9 @@ type Fields = {
   _stack: { number },
   _order: { number },
   _dirtyTransforms: { number },
+  _dirtyTransformCount: number,
   _dirtyBounds: { number },
-  _transformRoots: { number },
+  _dirtyBoundsCount: number,
   _remainingBounds: { number },
 }
 
@@ -180,12 +181,14 @@ function Scene.new(initialCapacity: number?): Scene
     _subtreeBounds = buffer.create((capacity + 1) * BoundsStride),
     _range = buffer.create((capacity + 1) * RangeStride),
 
-    -- Reused scratch. No per-frame node tables are allocated by update/query paths.
+    -- Reused scratch. No per-frame node tables are allocated by update/query paths, and none is
+    -- cleared: each list's length is kept beside it, and what lies past that is stale.
     _stack = table.create(256),
     _order = table.create(256),
     _dirtyTransforms = table.create(256),
+    _dirtyTransformCount = 0,
     _dirtyBounds = table.create(256),
-    _transformRoots = table.create(64),
+    _dirtyBoundsCount = 0,
     _remainingBounds = table.create(64),
   }, Scene)
 
@@ -255,8 +258,9 @@ function Scene._queueBounds(self: Scene, slot: number)
 
     if bit32.band(flags, BoundsDirty) == 0 then
       buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.bor(flags, BoundsDirty))
-      local list = self._dirtyBounds
-      list[#list + 1] = slot
+      local count = self._dirtyBoundsCount + 1
+      self._dirtyBounds[count] = slot
+      self._dirtyBoundsCount = count
     end
 
     slot = buffer.readi32(self._meta, metaOffset + MetaParent)
@@ -271,8 +275,9 @@ function Scene._markTransform(self: Scene, slot: number)
     buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.bor(flags, TransformDirty))
 
     if self._batchDepth == 0 then
-      local list = self._dirtyTransforms
-      list[#list + 1] = slot
+      local count = self._dirtyTransformCount + 1
+      self._dirtyTransforms[count] = slot
+      self._dirtyTransformCount = count
     else
       self._fullDirty = true
     end
@@ -451,8 +456,11 @@ function Scene.create(self: Scene, parentHandle: number?): number
     self._fullDirty = true
   else
     buffer.writeu32(self._meta, metaOffset + MetaFlags, bit32.bor(Alive, TransformDirty, Enabled, BoundsDirty))
-    self._dirtyTransforms[#self._dirtyTransforms + 1] = slot
-    self._dirtyBounds[#self._dirtyBounds + 1] = slot
+    local transformCount, boundsCount = self._dirtyTransformCount + 1, self._dirtyBoundsCount + 1
+    self._dirtyTransforms[transformCount] = slot
+    self._dirtyTransformCount = transformCount
+    self._dirtyBounds[boundsCount] = slot
+    self._dirtyBoundsCount = boundsCount
   end
 
   local localOffset = slot * LocalStride
@@ -489,15 +497,12 @@ function Scene.destroy(self: Scene, handle: number): number
 
   local stack = self._stack
   local order = self._order
-  table.clear(stack)
-  table.clear(order)
   local top = 1
   stack[1] = root
   local count = 0
 
   while top > 0 do
     local slot = stack[top]
-    stack[top] = nil
     top -= 1
     count += 1
     order[count] = slot
@@ -719,24 +724,27 @@ function Scene.update(self: Scene): UpdateCounts
   assert(self._batchDepth == 0, 'scene: update during batch')
   local dirtyTransforms = self._dirtyTransforms
   local dirtyBounds = self._dirtyBounds
+  local dirtyTransformCount, dirtyBoundsCount = self._dirtyTransformCount, self._dirtyBoundsCount
 
-  if not self._fullDirty and #dirtyTransforms == 0 and #dirtyBounds == 0 then
+  if not self._fullDirty and dirtyTransformCount == 0 and dirtyBoundsCount == 0 then
     return { nodesVisited = 0, transformsUpdated = 0, boundedNodes = 0, boundsUpdated = 0 }
   end
 
-  local transformRoots = self._transformRoots
-  table.clear(transformRoots)
+  local stack = self._stack
+  local order = self._order
+  local top = 0
 
   if self._fullDirty then
     local root = self._firstRoot
 
     while root ~= 0 do
-      transformRoots[#transformRoots + 1] = root
+      top += 1
+      stack[top] = root
       root = buffer.readi32(self._meta, root * MetaStride + MetaNext)
     end
   else
     -- Collapse direct transform dirties to the highest dirty roots before clearing any flags.
-    for index = 1, #dirtyTransforms do
+    for index = 1, dirtyTransformCount do
       local slot = dirtyTransforms[index]
       local metaOffset = slot * MetaStride
       local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
@@ -759,27 +767,19 @@ function Scene.update(self: Scene): UpdateCounts
         parent = buffer.readi32(self._meta, parent * MetaStride + MetaParent)
       end
 
-      if not covered then transformRoots[#transformRoots + 1] = slot end
+      if not covered then
+        top += 1
+        stack[top] = slot
+      end
     end
   end
 
-  local stack = self._stack
-  local order = self._order
-  table.clear(stack)
-  table.clear(order)
-
-  for index = 1, #transformRoots do
-    stack[index] = transformRoots[index]
-  end
-
-  local top = #transformRoots
   local visited = 0
   local boundedNodes = 0
 
   -- Every descendant of a dirty transform root inherits a new world transform.
   while top > 0 do
     local slot = stack[top]
-    stack[top] = nil
     top -= 1
     local metaOffset = slot * MetaStride
     local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
@@ -905,7 +905,7 @@ function Scene.update(self: Scene): UpdateCounts
   local remaining = self._remainingBounds
   table.clear(remaining)
 
-  for index = 1, #dirtyBounds do
+  for index = 1, dirtyBoundsCount do
     local slot = dirtyBounds[index]
     local flags = buffer.readu32(self._meta, slot * MetaStride + MetaFlags)
 
@@ -939,8 +939,8 @@ function Scene.update(self: Scene): UpdateCounts
     buffer.writeu32(self._meta, metaOffset + MetaFlags, flags)
   end
 
-  table.clear(dirtyTransforms)
-  table.clear(dirtyBounds)
+  self._dirtyTransformCount = 0
+  self._dirtyBoundsCount = 0
   self._fullDirty = false
   self._version += 1
 
@@ -957,7 +957,6 @@ function Scene.collect(self: Scene, mask: number?, out: { number }?): { number }
   local result = out or {}
   table.clear(result)
   local stack = self._stack
-  table.clear(stack)
   local top = 0
   local root = self._firstRoot
 
@@ -971,7 +970,6 @@ function Scene.collect(self: Scene, mask: number?, out: { number }?): { number }
 
   while top > 0 do
     local slot = stack[top]
-    stack[top] = nil
     top -= 1
     local metaOffset = slot * MetaStride
     local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
@@ -1012,7 +1010,6 @@ function Scene.queryAabb(
   local result = out or {}
   table.clear(result)
   local stack = self._stack
-  table.clear(stack)
   local top = 0
   local root = self._firstRoot
 
@@ -1026,7 +1023,6 @@ function Scene.queryAabb(
 
   while top > 0 do
     local slot = stack[top]
-    stack[top] = nil
     top -= 1
     local metaOffset = slot * MetaStride
     local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
@@ -1106,7 +1102,6 @@ function Scene.collectForView(
   local result = out or {}
   table.clear(result)
   local stack = self._stack
-  table.clear(stack)
   local top = 0
   local root = self._firstRoot
 
@@ -1120,7 +1115,6 @@ function Scene.collectForView(
 
   while top > 0 do
     local slot = stack[top]
-    stack[top] = nil
     top -= 1
     local metaOffset = slot * MetaStride
     local flags = buffer.readu32(self._meta, metaOffset + MetaFlags)
