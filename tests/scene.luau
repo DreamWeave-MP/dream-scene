@@ -710,6 +710,78 @@ suite.describe('view ranges', function()
   end)
 end)
 
+suite.describe('a number that is none', function()
+  local nowhere = 0 / 0
+
+  suite.it('is refused as a bound or a range', function()
+    local world = scene.new()
+    local node = world:create()
+
+    expect(function() world:setBounds(node, nowhere, 0, 0, 1, 1, 1) end).toThrow 'scene: invalid bounds'
+    expect(function() world:setBounds(node, 0, 0, 0, 1, nowhere, 1) end).toThrow 'scene: invalid bounds'
+    expect(function() world:setRange(node, nowhere, 1) end).toThrow 'scene: invalid LOD range'
+    expect(function() world:setRange(node, 0, nowhere) end).toThrow 'scene: invalid LOD range'
+  end)
+
+  suite.it('as a position hides a bare node and its descendants from every view and box', function()
+    local world = scene.new()
+    local lost = world:create()
+    local child = world:create(lost)
+    local found = world:create()
+    world:setPosition(lost, nowhere, 0, 0)
+    boxed(world, child)
+    boxed(world, found)
+
+    expect(world:update()).toEqual(counts(3, 2, 3))
+    expect(world:collect()).toEqual { lost, child, found }
+    expect(world:collectForView(0, 0, 0)).toEqual { found }
+    expect(world:collectForView(100, 0, 0)).toEqual { found }
+    expect(world:queryAabb(-math.huge, -math.huge, -math.huge, math.huge, math.huge, math.huge)).toEqual { found }
+    expect(world:queryAabb(-1, nowhere, -1, 1, 1, 1)).toEqual {}
+
+    local column, row, level = world:getWorldPosition(child)
+    expect({ column ~= column, row, level }).toEqual { true, 0, 0 }
+
+    world:setPosition(lost, 5, 0, 0)
+    expect(world:update()).toEqual(counts(2, 1, 2))
+    expect(world:collectForView(0, 0, 0)).toEqual { lost, child, found }
+    expect(world:queryAabb(4, -1, -1, 6, 6, 1)).toEqual { child }
+  end)
+
+  -- Only a box's first axis says whether it is one, so a box lost on another is still seen from
+  -- everywhere, and from nowhere, though no query finds it.
+  suite.it('as one axis of a boxed node\'s position leaves it in every view and no box', function()
+    local world = scene.new()
+    local lost = world:create()
+    local found = world:create()
+    world:setPosition(lost, 0, nowhere, 0)
+    boxed(world, lost)
+    boxed(world, found)
+    world:update()
+
+    expect(world:collectForView(0, 0, 0)).toEqual { lost, found }
+    expect(world:collectForView(100, 0, 0)).toEqual { lost, found }
+    expect(world:collectForView(nowhere, 0, 0)).toEqual { lost, found }
+    expect(world:queryAabb(-math.huge, -math.huge, -math.huge, math.huge, math.huge, math.huge)).toEqual { found }
+    expect(world:queryAabb(-1, -1, -1, 1, 1, 1)).toEqual { found }
+  end)
+
+  suite.it('is the distance between two infinities, so a bare node there is in no view', function()
+    local world = scene.new()
+    local bare = world:create()
+    local boxedThere = world:create()
+    world:setPosition(bare, math.huge, 0, 0)
+    world:setPosition(boxedThere, math.huge, 0, 0)
+    world:setRange(boxedThere, 0, 1e30)
+    boxed(world, boxedThere)
+    world:update()
+
+    expect(world:collectForView(0, 0, 0)).toEqual {}
+    expect(world:collectForView(math.huge, 0, 0)).toEqual { boxedThere }
+    expect(world:queryAabb(0, -1, -1, math.huge, 1, 1)).toEqual { boxedThere }
+  end)
+end)
+
 suite.describe('batches', function()
   suite.it('refuse an end with no begin, and an update before the end', function()
     local world = scene.new()
