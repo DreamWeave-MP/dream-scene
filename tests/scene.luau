@@ -168,6 +168,18 @@ suite.describe('handles', function()
     expect(string.find(message :: string, 'src/scene.luau', 1, true)).toBeNil()
   end)
 
+  suite.it('refuse a node made under itself, by the handle it will get, and leave it a root', function()
+    local world = scene.new()
+    world:create()
+
+    expect(function() world:create(handleOf(2, 1)) end).toThrow 'scene: node cannot parent itself'
+    expect(world:isAlive(handleOf(2, 1))).toBe(true)
+    expect(world:parent(handleOf(2, 1))).toBeNil()
+    expect(world:stats().nodes).toBe(2)
+    expect(world:stats().roots).toBe(2)
+    expect(world:update()).toEqual(counts(2, 0, 2))
+  end)
+
   suite.it('leave a failed create\'s node behind as a root', function()
     local world = scene.new()
     local stale = world:create()
