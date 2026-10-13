@@ -190,6 +190,33 @@ suite.describe('handles', function()
     expect(world:stats().roots).toBe(1)
     expect(world:isAlive(handleOf(1, 2))).toBe(true)
   end)
+
+  suite.it('leave a node made under no finite number behind as a root too, where a walk finds it', function()
+    local world = scene.new()
+    local first = world:create()
+    world:update()
+
+    -- None of these is a handle; a number that splits into no slot raises as a buffer does, and
+    -- anything else as arithmetic does.
+    for _, parent in { 0 / 0, math.huge, -math.huge, 'nine' :: any, {} :: any } do
+      expect(function() world:create(parent) end).toThrow()
+    end
+
+    expect(world:stats().nodes).toBe(6)
+    expect(world:stats().roots).toBe(6)
+    expect(world:collect()).toEqual {
+      first,
+      handleOf(2, 1),
+      handleOf(3, 1),
+      handleOf(4, 1),
+      handleOf(5, 1),
+      handleOf(6, 1),
+    }
+    expect(world:parent(handleOf(4, 1))).toBeNil()
+    expect(world:update()).toEqual(counts(5, 0, 5))
+    expect(world:destroy(handleOf(6, 1))).toBe(1)
+    expect(world:stats().roots).toBe(5)
+  end)
 end)
 
 suite.describe('the tree', function()

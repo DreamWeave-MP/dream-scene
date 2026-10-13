@@ -528,7 +528,14 @@ function Scene.create(self: Scene, parentHandle: number?): number
 
   self._count += 1
   local handle = encode(slot, generation)
-  local parent = if parentHandle then liveSlot(meta, self._high, parentHandle) else 0
+  local parent = 0
+
+  -- Only a whole number is looked up here, where the lookup is setParent's own: anything else
+  -- raises on the way to a slot or reads between two, which is setParent's to do once the node
+  -- is a root.
+  if type(parentHandle) == 'number' and parentHandle % 1 == 0 then
+    parent = liveSlot(meta, self._high, parentHandle)
+  end
 
   -- Under a live parent the node is linked straight there, which leaves every list as linking
   -- it among the roots and moving it would. Any other parent is setParent's to refuse, in its
