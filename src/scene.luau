@@ -549,7 +549,7 @@ end
 
 function Scene.destroy(self: Scene, handle: number): number
   local root = self:_slot(handle)
-  local { _meta: meta, _stack: stack, _order: order } = self
+  local { _meta: meta, _stack: stack, _free: free } = self
   local oldParent = buffer.readi32(meta, root * MetaStride + MetaParent)
   unlink(self, root)
 
@@ -559,25 +559,21 @@ function Scene.destroy(self: Scene, handle: number): number
   stack[1] = root
   local count = 0
 
+  -- A node is freed as it comes off the stack, once its children are on it: nothing reads a
+  -- freed node's links again.
   while top > 0 do
     local slot = stack[top]
     top -= 1
     count += 1
-    order[count] = slot
-    local child = buffer.readi32(meta, slot * MetaStride + MetaFirstChild)
+    local metaOffset = slot * MetaStride
+    local child = buffer.readi32(meta, metaOffset + MetaFirstChild)
 
     while child ~= 0 do
       top += 1
       stack[top] = child
       child = buffer.readi32(meta, child * MetaStride + MetaNext)
     end
-  end
 
-  local free = self._free
-
-  for index = 1, count do
-    local slot = order[index]
-    local metaOffset = slot * MetaStride
     local generation = buffer.readu32(meta, metaOffset + MetaGeneration) + 1
 
     if generation >= 0x1fffffff then generation = 1 end
