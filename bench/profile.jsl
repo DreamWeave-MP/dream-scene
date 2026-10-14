@@ -1,7 +1,7 @@
 --!strict
 --!native
 -- One workload of a flat world of cells, run in a loop for `jess run --profile`:
--- `jess run --profile --package . bench/profile.luau [mode] [nodes] [iterations]`. The modes are
+-- `jess run --profile --package . bench/profile.jsl [mode] [nodes] [iterations]`. The modes are
 -- idle, dirtyleaf, dirtyroot, dirty1pct, collect, query-small, query-world, view and churn.
 local scene = require '@dream/scene'
 

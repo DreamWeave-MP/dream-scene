@@ -1,13 +1,13 @@
 # dream.scene 0.1.0 benchmarks
 
-The move onto l3i 2.0, measured as an A/B with `bench/bench.luau`. `PROFILE.md` is the older record, of the session that made the scene incremental; nothing in it was remeasured here.
+The move onto l3i 2.0, measured as an A/B with `bench/bench.jsl`. `PROFILE.md` is the older record, of the session that made the scene incremental; nothing in it was remeasured here.
 
 ## On l3i 2.0
 
 Measured on 2026-10-12 on an Intel(R) Core(TM) i7-10870H CPU @ 2.20GHz (16 threads), with Jess 0.1.0 on l3i 2.0.2, a verified release build, by
 
 ```sh
-jess run --package jpk/dream-scene --package-path jpk jpk/dream-scene/bench/bench.luau
+jess run --package jpk/dream-scene --package-path jpk jpk/dream-scene/bench/bench.jsl
 ```
 
 Base is commit `c7d9adb`: 0.1.0 as imported, with its suite, this bench, and one fix to the count of roots that `stats()` reports, which no workload times. Head is `1f40ca1`, the last commit to touch the source. Same binary, five rounds inside one hold of the machine's bench lock, base and head each once a round and the order turned every round; each figure is the median of the five, each of which is the bench's own median of seven batches. The last column is the ratio from a second hold, of three rounds, with glibc told neither to trim its heap nor to map large blocks apart (`MALLOC_TRIM_THRESHOLD_` and `MALLOC_MMAP_THRESHOLD_` at a gibibyte) on both sides: no row here is of two minds about its heap, and the two holds agree. Every workload checks what it answers against what 0.1.0 answers (what an update counts, how many handles a traversal lists and a digest of them in order), before its first batch and after its last, and base and head pass the same checks.

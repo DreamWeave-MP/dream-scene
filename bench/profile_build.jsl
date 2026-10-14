@@ -1,7 +1,7 @@
 --!strict
 --!native
 -- The build of a flat world of cells and its first update, for `jess run --profile`:
--- `jess run --profile --package . bench/profile_build.luau [nodes] [batch|incremental]`.
+-- `jess run --profile --package . bench/profile_build.jsl [nodes] [batch|incremental]`.
 local scene = require '@dream/scene'
 
 local nodes = tonumber(arg[1]) or 100000

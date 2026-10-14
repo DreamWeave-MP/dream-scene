@@ -1,7 +1,7 @@
 --!strict
 -- dream.scene, timed from Luau: building scenes, updates after edits of every size, traversals,
 -- box queries, view collection and churn, on a flat world of cells and on a tree seven levels
--- deep. Run by `jess run --package . bench/bench.luau [filter] [results]` on a release build;
+-- deep. Run by `jess run --package . bench/bench.jsl [filter] [results]` on a release build;
 -- the filter is text a workload's name must hold, or several such, `|` between them. Prints one
 -- line per workload: its name, a tab, and the seconds one call takes, a call being what the name
 -- says. Every workload's answer is checked against what 0.1.0 answers, before the first batch and

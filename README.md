@@ -44,4 +44,4 @@ Important operations:
 
 Node handles are numeric and generation checked. Node objects are never allocated.
 
-See `DESIGN.md` for the OSG-derived architecture cut and `BENCHMARKS.md` for what each operation costs, measured by `bench/bench.luau`. `PROFILE.md` and `bench/results/` are the record of the session that first made the scene incremental: its measurements and raw Jess profiler output, as they stood then.
+See `DESIGN.md` for the OSG-derived architecture cut and `BENCHMARKS.md` for what each operation costs, measured by `bench/bench.jsl`. `PROFILE.md` and `bench/results/` are the record of the session that first made the scene incremental: its measurements and raw Jess profiler output, as they stood then.
