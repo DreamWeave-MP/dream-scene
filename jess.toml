@@ -4,7 +4,7 @@ manifest_version = 1
 id = "org.dreamweave.scene"
 version = "0.1.0"
 jess_api = "1"
-include = ["src", "bench", "README.md", "DESIGN.md", "PROFILE.md", "BENCHMARKS.md"]
+include = ["src", "bench", "README.md", "DESIGN.md", "PROFILE.md", "BENCHMARKS.md", "tests"]
 tests = ["tests/scene.jsl", "tests/style.jsl"]
 
 [modules]
