@@ -109,3 +109,63 @@ None of this is in the package, and none of it was measured again with the table
 - **A reused `out` table is cleared whole.** `collect`, `queryAabb` and `collectForView` promise the table they are handed holds the answer and nothing else, so they `table.clear` it, and that costs its capacity, not its length: the query that finds 64 handles takes 39 microseconds into a table of its own and 90 into one that once held all 100,000. Keep a table for each size of question.
 - **A query walks every root.** The 39 microseconds are 1,562 cells tested one by one; the hierarchy only prunes below a root. A flat world wants its cells under a few parents, or the spatial index `DESIGN.md` leaves to another package.
 - **A fold reads every child.** One leaf resized folds its parent over all its siblings, which is most of what a bounds-only update costs.
+
+## Which modules are native, and why
+
+Jess compiles to machine code only what is marked (`--!native` on a module, `@native` on one
+function), and every load pays for what is marked. A module carries `--!native` when a row below
+spends its time there and the module is small (12 KB or less); a larger module carries `@native`
+on the functions the row spends its time in, and nothing else.
+
+Measured 2026-10-15 with `jess 0.1.0`, the verified release build of jess `07c38cb` on l3i
+2.0.3, on the i7-10870H, the one-minute load 1.16 and 1.43 at the start of the two
+sessions. In each session the bench ran alternately on this package and on a copy of it with
+every module marked, three fresh runs of `bench/bench.jsl` each, every run's row the median of
+its batches; a column is the median of the three, and a ratio is against the all-marked runs of
+the same session. Which functions a row spends its time in comes from `jess run --profile` of
+that row alone, unmarked. The load cost is a fresh `jess run --package <this package>
+--package-path jpk` of a script that only requires `@dream/scene`, the two sides alternating, the
+median of five each after one warm-up.
+
+| Requiring `@dream/scene` | All marked | This state |
+| --- | ---: | ---: |
+| Unmarked | 0.054 s | 0.047 s |
+| Final | 0.052 s | 0.051 s |
+
+| Row | All marked (ms) | Unmarked / all marked | Final (ms) | Final / all marked |
+| --- | ---: | ---: | ---: | ---: |
+| build 20,000 nodes one at a time | 14.61 | **4.954×** | 14.66 | 1.003× |
+| build 20,000 nodes in a batch | 12.67 | **4.805×** | 13.60 | **1.073×** |
+| build 100,000 nodes in a batch | 66.60 | **4.741×** | 69.97 | **1.051×** |
+| flat: update with nothing to do | 0.00012 | **1.197×** | 0.00012 | 1.034× |
+| flat: move a leaf and back, an update after each | 0.00337 | **7.894×** | 0.00340 | 1.010× |
+| flat: move a cell of 64 and back, an update after each | 0.01891 | **10.608×** | 0.01977 | 1.045× |
+| flat: move 1,000 leaves of 1,000 cells and back, an update after each | 3.823 | **7.048×** | 3.778 | 0.988× |
+| flat: resize the boxes of 1,000 leaves and back, an update after each | 3.653 | **7.050×** | 3.605 | 0.987× |
+| flat: resize the boxes of 10,000 leaves and of 100 cells, and back, an update after each | 10.34 | **6.913×** | 10.01 | 0.968× |
+| flat: move a leaf in a batch and realize all 100,000 nodes | 14.97 | **10.586×** | 14.61 | 0.976× |
+| flat: collect every node | 2.420 | **4.993×** | 2.374 | 0.981× |
+| flat: collect through a mask half the cells wear | 1.329 | **4.773×** | 1.294 | 0.974× |
+| flat: query a box around one cell | 0.03865 | **7.488×** | 0.03842 | 0.994× |
+| flat: query a box around one cell, into a table that held every node | 0.08730 | **3.862×** | 0.08647 | 0.990× |
+| flat: query a box around a hundred cells | 0.3277 | **8.066×** | 0.3189 | 0.973× |
+| flat: query a box around the world | 4.564 | **8.015×** | 4.634 | 1.015× |
+| flat: collect for a view from a corner | 4.101 | **6.276×** | 3.988 | 0.972× |
+| flat: collect for a view from the middle, through a mask | 2.154 | **6.350×** | 2.102 | 0.976× |
+| tree: move 500 nodes of four depths and back, an update after each | 1.691 | **10.668×** | 1.667 | 0.986× |
+| tree: resize the boxes of 2,000 leaves and back, an update after each | 2.210 | **7.201×** | 2.255 | 1.021× |
+| tree: collect every node | 1.218 | **5.734×** | 1.199 | 0.984× |
+| tree: query a box around one branch | 0.03479 | **9.353×** | 0.03522 | 1.012× |
+| tree: collect for a view from beside the root | 1.568 | **7.117×** | 1.599 | 1.020× |
+| churn: create and destroy 1,000 leaves, then update | 0.6943 | **7.130×** | 0.8765 | **1.262×** |
+| churn: move 1,000 leaves to other cells and back, an update after each | 1.736 | **7.364×** | 2.412 | **1.389×** |
+| churn: destroy 16 cells of 64 and build them again, then update | 0.7300 | **5.472×** | 0.7537 | 1.032× |
+
+What carries the directive: `scene`, whole, the package's only module, as before this pass.
+
+Marking only the functions the rows' profiles named (the bounds and transform propagation, the
+cell bookkeeping, `update`, `collect`, and the queries) saved 1.4 ms a load and left the churn
+rows 1.26x and 1.39x slower than all marked: creating and destroying 1,000 leaves and moving them
+between cells, each followed by an update. A scene does that every frame and loads once, so the
+module stays marked whole. The table's final column is that function-marked session, kept as the
+record of what was tried; the package ships as all marked.
