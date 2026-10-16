@@ -165,7 +165,7 @@ suite.describe('handles', function()
 
     expect(succeeded).toBe(false)
     expect(message).toContain 'tests/scene.jsl:'
-    expect(string.find(message :: string, 'src/scene.jsl', 1, true)).toBeNil()
+    expect((string.find(message :: string, 'src/scene.jsl', 1, true))).toBeNil()
   end)
 
   suite.it('refuse a node made under itself, by the handle it will get, and leave it a root', function()
@@ -686,7 +686,7 @@ suite.describe('masks and switches', function()
 
     world:setEnabled(other, false)
     expect(world:collect(nil, out)).toBe(out)
-    expect(next(out)).toBeNil()
+    expect((next(out))).toBeNil()
   end)
 end)
 
