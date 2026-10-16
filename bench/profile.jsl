@@ -10,7 +10,8 @@ local nodes = tonumber(arg[2]) or 100000
 local iterations = tonumber(arg[3]) or 100
 local world = scene.new(nodes)
 local cellCount = math.max(1, nodes // 64)
-local cells, leaves = table.create(cellCount), table.create(nodes - cellCount)
+local cells, leaves =
+  table.create(cellCount) :: { number }, table.create(nodes - cellCount) :: { number }
 local out: { number } = {}
 
 world:beginBatch()

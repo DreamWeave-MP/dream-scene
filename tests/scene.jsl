@@ -888,7 +888,7 @@ suite.describe('batches', function()
   suite.it('build the scene an unbatched build does', function()
     local function build(batched: boolean): (World, { number })
       local world = scene.new(16)
-      local made = table.create(400)
+      local made = table.create(400) :: { number }
 
       if batched then world:beginBatch() end
 
@@ -928,7 +928,7 @@ end)
 suite.describe('growth', function()
   suite.it('keeps every node when the scene outgrows its capacity', function()
     local world = scene.new(16)
-    local made = table.create(1000)
+    local made = table.create(1000) :: { number }
 
     for index = 1, 1000 do
       local node = world:create()
@@ -961,7 +961,7 @@ suite.describe('growth', function()
   suite.it('walks, moves and destroys a node with five thousand children', function()
     local world = scene.new(16)
     local root = world:create()
-    local made = table.create(5001)
+    local made = table.create(5001) :: { number }
     made[1] = root
 
     for index = 1, 5000 do
@@ -1015,7 +1015,7 @@ suite.describe('growth', function()
 
   suite.it('folds bounds up a chain three thousand deep', function()
     local world = scene.new(16)
-    local made = table.create(3000)
+    local made = table.create(3000) :: { number }
 
     for index = 1, 3000 do
       local node = world:create(made[index - 1])
@@ -1102,7 +1102,7 @@ local function digests(run: Run): { number }
   local world = scene.new(16)
   local state = run.seed
   local alive: { number }, out: { number } = {}, {}
-  local results = table.create(run.rounds)
+  local results = table.create(run.rounds) :: { number }
   local digest = 0
 
   -- The minimal standard generator: its products stay whole in an f64.

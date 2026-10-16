@@ -8,7 +8,7 @@ local nodes = tonumber(arg[1]) or 100000
 local batched = (arg[2] or 'batch') == 'batch'
 local world = scene.new(nodes)
 local cellCount = math.max(1, nodes // 64)
-local cells = table.create(cellCount)
+local cells = table.create(cellCount) :: { number }
 
 if batched then world:beginBatch() end
 

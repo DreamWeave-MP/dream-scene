@@ -66,7 +66,13 @@ local function median(samples: { number }): number
 end
 
 local function wanted(name: string): boolean
-  return not only or any[for part in string.split(only, '|') if string.find(name, part, 1, true) => true]
+  if not only then return true end
+
+  for _, part in string.split(only, '|') do
+    if string.find(name, part, 1, true) then return true end
+  end
+
+  return false
 end
 
 local function check(name: string, answer: string)
@@ -107,7 +113,7 @@ local function timed(name: string, body: () -> (), audit: () -> string)
   end
 
   calls = math.max(1, math.floor(0.1 * calls / elapsed))
-  local samples = table.create(7)
+  local samples = table.create(7) :: { number }
 
   for batch = 1, 7 do
     jess.bench.collect()
@@ -171,7 +177,8 @@ end
 local function flat(count: number, batched: boolean): Flat
   local world = scene.new(count)
   local cellCount = math.max(1, count // 64)
-  local cells, leaves = table.create(cellCount), table.create(count - cellCount)
+  local cells, leaves =
+    table.create(cellCount) :: { number }, table.create(count - cellCount) :: { number }
 
   if batched then world:beginBatch() end
 
@@ -206,7 +213,7 @@ local function tree(depth: number): (World, { { number } })
 
   for level = 1, depth do
     local above = levels[level]
-    local nodes = table.create(#above * Fanout)
+    local nodes = table.create(#above * Fanout) :: { number }
     spacing /= 4
 
     for index, parent in above do

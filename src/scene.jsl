@@ -193,11 +193,11 @@ function Scene.new(initialCapacity: number?): Scene
 
     -- Reused scratch. No per-frame node tables are allocated by update/query paths, and none is
     -- cleared: each list's length is kept beside it, and what lies past that is stale.
-    _stack = table.create(256),
-    _order = table.create(256),
-    _dirtyTransforms = table.create(256),
+    _stack = table.create(256) :: { number },
+    _order = table.create(256) :: { number },
+    _dirtyTransforms = table.create(256) :: { number },
     _dirtyTransformCount = 0,
-    _dirtyBounds = table.create(256),
+    _dirtyBounds = table.create(256) :: { number },
     _dirtyBoundsCount = 0,
     _remaining = buffer.create(256),
     _depthKeys = buffer.create(256),
@@ -402,9 +402,11 @@ local function foldSubtreeBounds(
     local childMaxY = buffer.readf32(subtreeBounds, childOffset + 16)
     local childMaxZ = buffer.readf32(subtreeBounds, childOffset + 20)
 
+    -- The last of each three is parenthesized: unwrapped, the type checker reads it as `number?`
+    -- once the loop has run.
     if childMinX <= childMaxX then
-      minX, minY, minZ = math.min(minX, childMinX), math.min(minY, childMinY), math.min(minZ, childMinZ)
-      maxX, maxY, maxZ = math.max(maxX, childMaxX), math.max(maxY, childMaxY), math.max(maxZ, childMaxZ)
+      minX, minY, minZ = math.min(minX, childMinX), math.min(minY, childMinY), (math.min(minZ, childMinZ))
+      maxX, maxY, maxZ = math.max(maxX, childMaxX), math.max(maxY, childMaxY), (math.max(maxZ, childMaxZ))
     end
 
     child = buffer.readi32(meta, child * MetaStride + MetaNext)
