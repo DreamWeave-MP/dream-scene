@@ -1,0 +1,40 @@
+base_url = "https://dreamweave-mp.github.io/dream-scene"
+title = "dream-scene"
+description = "Renderer-agnostic 3D scene and world presentation storage for Jess, a Luau package."
+compile_sass = true
+build_search_index = true
+generate_feeds = true
+feed_filenames = ["atom.xml"]
+taxonomies = [{ name = "tags", feed = false }]
+
+[search]
+index_format = "fuse_json"
+include_title = true
+include_description = true
+include_content = true
+truncate_content_length = 400
+
+[markdown]
+highlighting = { theme = "dracula-soft" }
+insert_anchor_links = "right"
+smart_punctuation = true
+
+[slugify]
+paths = "safe"
+
+[link_checker]
+skip_prefixes = ["https://github.com/", "https://www.nexusmods.com/"]
+
+[extra]
+github_username = "DreamWeave-MP"
+github_project = "dream-scene"
+logo_text = "dream-scene"
+palette = "azure"
+menu_items = [
+    { name = "dream-scene", url = "@/home/index.md" },
+    { name = "Network", url = "@/network.md" },
+]
+
+[extra.comments]
+enabled = false
+category = "General"
