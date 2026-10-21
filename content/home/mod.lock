@@ -1,0 +1,49 @@
+{
+  "schema_version": "3",
+  "document": "lock",
+  "project": "e20f98cb-26dd-4bfa-8c4e-e9f7e2c6db1f",
+  "note": "Written by CI when a release tag is pushed: what each published release's archive contains. Do not edit.",
+  "releases": [
+    {
+      "version": "0.1.0",
+      "locked_from": "d69e7a9749673f811caabd2c37c19d03a5014b84",
+      "artifacts": [
+        {
+          "id": "jpk",
+          "format": "jpk",
+          "filename": "org.dreamweave.scene-0.1.0.jpk",
+          "media_type": "application/vnd.jess.jpk",
+          "size": 61232,
+          "digests": {
+            "sha256": "f1c609e290d471e1182949c95c3cd59012fa921bee846a91630416627d0608df"
+          },
+          "jess": {
+            "package": "org.dreamweave.scene",
+            "jess_api": "1",
+            "content_digest": "969eac34fd267bcb89c6cf57fa8f0a24fefda7db091e077bb069a05111c7275f",
+            "dependencies": {}
+          }
+        }
+      ],
+      "runtimes": {},
+      "platforms": [],
+      "provides": [],
+      "relationships": [],
+      "components": [
+        {
+          "id": "main",
+          "name": "dream-scene",
+          "path": ".",
+          "required": true,
+          "default": true,
+          "requires": [],
+          "conflicts": [],
+          "suggested_with": []
+        }
+      ],
+      "groups": [],
+      "extensions": {},
+      "critical_extensions": []
+    }
+  ]
+}
